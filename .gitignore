@@ -1,0 +1,24 @@
+# Python backend (Supertonic-100m)
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.env
+.api_keys.json
+.gradio/
+
+# Frontend (Node/Vite)
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Editors / OS
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+
+# Claude Code project files (tooling-local, not part of the app)
+.claude/
