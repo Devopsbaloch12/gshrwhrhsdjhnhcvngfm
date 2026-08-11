@@ -4,6 +4,7 @@ Moonshine (STT) -> Groq (LLM) -> Supertonic (TTS), fully hands-free after one cl
 import base64
 import io
 import time
+from pathlib import Path
 
 import numpy as np
 import gradio as gr
@@ -11,9 +12,12 @@ import soundfile as sf
 from fastapi import HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+
+FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
 from voice_pipeline import vad, stt, llm, tts, apikeys
-from voice_pipeline.audio_utils import to_mono_tensor
+from voice_pipeline.audio_utils import to_mono_tensor, decode_browser_audio, AudioDecodeError
 from voice_pipeline.emotions import DEFAULT_EMOTION, EMOTION_PRESETS, VOICE_CHOICES
 
 PREROLL_SAMPLES = int(vad.PREROLL_SEC * vad.SAMPLE_RATE)
@@ -118,6 +122,27 @@ def _run_converse(user_text: str, voice: str, emotion: str) -> tuple[str, np.nda
     return reply_text, speech, speech_sr
 
 
+def _run_converse_audio(raw_audio_bytes: bytes, voice: str, emotion: str) -> tuple[str, str, np.ndarray, int]:
+    """Audio-in -> STT -> LLM reply -> TTS audio. Mirrors _run_converse but starts from
+    raw browser-recorded bytes instead of already-typed text. Synchronous/blocking -
+    callers should run this off the event loop."""
+    try:
+        audio_np, sr = decode_browser_audio(raw_audio_bytes)
+    except AudioDecodeError as exc:
+        raise ValueError(f"Couldn't process that recording: {exc}") from exc
+    user_text = stt.transcribe(audio_np, sr)
+    if not user_text:
+        raise ValueError("Didn't catch any speech in that recording - try again.")
+    if voice not in VOICE_CHOICES:
+        voice = tts.DEFAULT_VOICE
+    if emotion not in EMOTION_PRESETS:
+        emotion = DEFAULT_EMOTION
+    reply_text = llm.reply([{"role": "user", "content": user_text}], emotion=emotion)
+    speed = EMOTION_PRESETS[emotion]["speed"]
+    speech, speech_sr = tts.synthesize(reply_text, voice=voice, speed=speed)
+    return user_text, reply_text, speech, speech_sr
+
+
 def _run_preview(voice: str, emotion: str) -> tuple[np.ndarray, int]:
     """Voice-in -> TTS audio for a fixed preview line. Skips STT and LLM entirely.
     Synchronous/blocking - callers should run this off the event loop."""
@@ -195,6 +220,40 @@ async def api_converse_route(request: Request):
     sf.write(buf, speech, speech_sr, format="WAV")
     audio_b64 = base64.b64encode(buf.getvalue()).decode()
     return {"reply_text": reply_text, "audio_base64": audio_b64, "sample_rate": speech_sr}
+
+
+async def api_converse_audio_route(request: Request):
+    """POST /api/converse_audio - audio-in counterpart to /api/converse, for real client-
+    side mic recordings (multipart/form-data: `audio` file + api_key/voice/emotion fields)
+    instead of the browser's own Web Speech API. That API hands recognition off to the
+    OS's registered speech service - on Android Chrome that's typically bound to the
+    Google app, so tapping the mic would visibly launch Google Assistant instead of
+    staying in this page. This route keeps STT on our own backend (Moonshine) instead,
+    same as the Gradio UI's mic already does."""
+    form = await request.form()
+    api_key = str(form.get("api_key") or "")
+    if not apikeys.is_valid(api_key):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key.")
+    audio_field = form.get("audio")
+    if audio_field is None or not hasattr(audio_field, "read"):
+        raise HTTPException(status_code=400, detail="audio file is required.")
+    raw_bytes = await audio_field.read()
+    if not raw_bytes:
+        raise HTTPException(status_code=400, detail="audio file is empty.")
+    voice = str(form.get("voice") or tts.DEFAULT_VOICE)
+    emotion = str(form.get("emotion") or DEFAULT_EMOTION)
+
+    try:
+        user_text, reply_text, speech, speech_sr = await run_in_threadpool(
+            _run_converse_audio, raw_bytes, voice, emotion
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    buf = io.BytesIO()
+    sf.write(buf, speech, speech_sr, format="WAV")
+    audio_b64 = base64.b64encode(buf.getvalue()).decode()
+    return {"user_text": user_text, "reply_text": reply_text, "audio_base64": audio_b64, "sample_rate": speech_sr}
 
 
 CUSTOM_CSS = """
@@ -497,20 +556,36 @@ def _warmup():
 if __name__ == "__main__":
     _warmup()
     fastapi_app, local_url, share_url = demo.launch(
-        share=True, theme=THEME, css=CUSTOM_CSS, prevent_thread_lock=True, footer_links=[]
+        server_name="0.0.0.0", server_port=7860, share=False,
+        theme=THEME, css=CUSTOM_CSS, prevent_thread_lock=True, footer_links=[]
     )
     fastapi_app.add_api_route("/api/converse", api_converse_route, methods=["POST"])
+    fastapi_app.add_api_route("/api/converse_audio", api_converse_audio_route, methods=["POST"])
     fastapi_app.add_api_route("/api/preview", api_preview_route, methods=["POST"])
     fastapi_app.add_api_route("/api/keys/generate", api_generate_key_route, methods=["POST"])
     fastapi_app.add_api_route("/api/keys/revoke", api_revoke_key_route, methods=["POST"])
+
+    if FRONTEND_DIST.is_dir():
+        # Serves the built React SPA under /app on this same port, same origin as
+        # /api/* - so the whole thing (Gradio demo at /, API at /api, frontend at
+        # /app) is reachable through a single exposed port instead of needing a
+        # separate origin/port for the frontend dev server.
+        async def serve_frontend(full_path: str = ""):
+            candidate = FRONTEND_DIST / full_path
+            if full_path and candidate.is_file():
+                return FileResponse(candidate)
+            return FileResponse(FRONTEND_DIST / "index.html")
+
+        fastapi_app.add_api_route("/app", serve_frontend, methods=["GET"])
+        fastapi_app.add_api_route("/app/{full_path:path}", serve_frontend, methods=["GET"])
+
     try:
-        # Only needed when the frontend is served from a different origin than this
-        # backend (e.g. a separately hosted SPA calling a *.gradio.live share URL).
-        # The local dev setup instead proxies /api through the Vite dev server, which
-        # is same-origin and doesn't need this - see frontend/vite.config.ts. Wrapped
-        # in try/except because Starlette refuses to add middleware once its stack has
-        # already been built from an earlier request; that's not fatal here, just means
-        # cross-origin callers would need a proxy too.
+        # Needed here because the frontend is served from a different origin than this
+        # backend (separate RunPod proxy subdomain per port). Starlette normally refuses
+        # to add middleware once its stack has already been built from an earlier
+        # request (Gradio's own startup ping does this before we get here), so we reset
+        # the built stack to force it to rebuild lazily on the next incoming request.
+        fastapi_app.middleware_stack = None
         fastapi_app.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],

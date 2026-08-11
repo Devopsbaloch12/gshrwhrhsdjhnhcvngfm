@@ -9,6 +9,11 @@ import tailwindcss from '@tailwindcss/vite'
 const BACKEND_TARGET = process.env.VITE_API_PROXY_TARGET ?? "http://127.0.0.1:7860"
 
 export default defineConfig({
+  // The production build is served by the Python backend under /app (see
+  // Supertonic-100m/app.py's serve_frontend route), not from the domain root, so
+  // built asset URLs must be prefixed accordingly or the JS/CSS 404 and the page
+  // renders blank. The Vite dev server itself still runs at "/".
+  base: "/app/",
   plugins: [react(), tailwindcss()],
   server: {
     port: 5173,

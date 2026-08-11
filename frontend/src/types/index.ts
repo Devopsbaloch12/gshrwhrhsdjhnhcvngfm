@@ -38,6 +38,10 @@ export interface ConverseResponse {
   sample_rate: number;
 }
 
+export interface ConverseAudioResponse extends ConverseResponse {
+  user_text: string;
+}
+
 // The backend's key store (voice_pipeline/apikeys.py) is explicitly documented as
 // demo-grade - no per-key IDs, a key IS its own identifier - so revoking a key later
 // requires the full value, which is why it's kept here rather than only a preview.

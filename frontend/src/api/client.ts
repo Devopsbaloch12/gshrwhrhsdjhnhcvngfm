@@ -1,4 +1,4 @@
-import type { ConverseResponse } from "../types";
+import type { ConverseResponse, ConverseAudioResponse } from "../types";
 
 export class ApiError extends Error {
   status: number;
@@ -43,6 +43,37 @@ export function converse(
     emotion: args.emotion,
     api_key: args.apiKey,
   });
+}
+
+export async function converseAudio(
+  baseUrl: string,
+  args: { audioBlob: Blob; voice: string; emotion: string; apiKey: string }
+): Promise<ConverseAudioResponse> {
+  const form = new FormData();
+  // Filename extension doesn't matter here - ffmpeg on the backend sniffs the actual
+  // container/codec from the bytes, not from this name or the blob's mime type.
+  form.append("audio", args.audioBlob, "recording");
+  form.append("voice", args.voice);
+  form.append("emotion", args.emotion);
+  form.append("api_key", args.apiKey);
+
+  let res: Response;
+  try {
+    res = await fetch(`${baseUrl}/api/converse_audio`, { method: "POST", body: form });
+  } catch {
+    throw new ApiError("Can't reach the voice agent backend. Is it running?", 0);
+  }
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const data = await res.json();
+      detail = data.detail ?? detail;
+    } catch {
+      // response wasn't JSON - fall back to statusText
+    }
+    throw new ApiError(detail, res.status);
+  }
+  return res.json() as Promise<ConverseAudioResponse>;
 }
 
 export function previewVoice(

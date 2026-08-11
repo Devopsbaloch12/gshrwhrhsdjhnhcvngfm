@@ -1,21 +1,17 @@
-import { BrowserRouter, Routes, Route } from "react-router-dom";
-import { AppShell } from "./components/layout/AppShell";
-import { HomePage } from "./pages/HomePage";
-import { HistoryPage } from "./pages/HistoryPage";
-import { SettingsPage } from "./pages/SettingsPage";
-import { ApiKeysPage } from "./pages/ApiKeysPage";
+import { DashboardShell } from "./components/layout/DashboardShell";
+import { VoiceAgentSection } from "./sections/VoiceAgentSection";
+import { VoiceSection } from "./sections/VoiceSection";
+import { ApiSection } from "./sections/ApiSection";
+import { useActiveSection } from "./hooks/useActiveSection";
 
 export default function App() {
+  const { section, navigate } = useActiveSection();
+
   return (
-    <BrowserRouter>
-      <AppShell>
-        <Routes>
-          <Route path="/" element={<HomePage />} />
-          <Route path="/history" element={<HistoryPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
-          <Route path="/keys" element={<ApiKeysPage />} />
-        </Routes>
-      </AppShell>
-    </BrowserRouter>
+    <DashboardShell active={section} onNavigate={navigate}>
+      {section === "voice-agent" && <VoiceAgentSection onNavigate={navigate} />}
+      {section === "voice" && <VoiceSection />}
+      {section === "api" && <ApiSection />}
+    </DashboardShell>
   );
 }

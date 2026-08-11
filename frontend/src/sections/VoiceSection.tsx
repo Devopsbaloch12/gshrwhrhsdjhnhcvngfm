@@ -1,11 +1,12 @@
 import { GlassCard } from "../components/common/GlassCard";
 import { SectionTitle } from "../components/common/SectionTitle";
+import { SectionHeader } from "../components/common/SectionHeader";
 import { VoiceSelector } from "../components/voice/VoiceSelector";
 import { EMOTIONS } from "../lib/voices";
 import { useSettingsStore } from "../store/settingsStore";
 import { cn } from "../lib/utils";
 
-export function SettingsPage() {
+export function VoiceSection() {
   const emotion = useSettingsStore((s) => s.emotion);
   const setEmotion = useSettingsStore((s) => s.setEmotion);
   const apiBaseUrl = useSettingsStore((s) => s.apiBaseUrl);
@@ -13,10 +14,7 @@ export function SettingsPage() {
 
   return (
     <div className="flex flex-col gap-8">
-      <div>
-        <h1 className="font-display text-xl font-semibold text-ink-50">Assistant settings</h1>
-        <p className="mt-1 text-sm text-ink-400">Pick a voice and tone, and where the assistant lives.</p>
-      </div>
+      <SectionHeader title="Voice" subtitle="Pick a voice and tone, and where the assistant lives." />
 
       <GlassCard className="p-5">
         <VoiceSelector />
@@ -46,8 +44,8 @@ export function SettingsPage() {
       <GlassCard className="flex flex-col gap-3 p-5">
         <SectionTitle>Backend URL</SectionTitle>
         <p className="text-xs text-ink-500">
-          Leave this as-is when running the dashboard's dev server alongside the backend locally. Set it to a
-          share link (e.g. a *.gradio.live URL) to talk to a remote deployment instead.
+          Leave this blank to call the same origin this dashboard was loaded from. Set it to point at a
+          different deployment instead (e.g. a RunPod proxy URL or a local dev backend).
         </p>
         <input
           value={apiBaseUrl}

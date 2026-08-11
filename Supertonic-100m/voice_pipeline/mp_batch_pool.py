@@ -22,14 +22,20 @@ from concurrent.futures import Future
 _ctx = mp.get_context("spawn")
 
 
-def _worker_loop(task_q, result_q, worker_init, worker_batch_fn, batch_window_sec, max_batch):
+def _worker_loop(task_q, result_q, worker_init, worker_batch_fn, batch_window_sec, max_batch, max_wait_sec):
+    """Batch collection uses a sliding quiet-period timeout, not a fixed deadline: each
+    new arrival resets the wait for the next one, so a burst of concurrent callers whose
+    completion times are spread out (e.g. by upstream LLM latency jitter) still collapses
+    into one batch as long as arrivals keep trickling in faster than batch_window_sec
+    apart. max_wait_sec is a hard cap from the first item so one straggler can't stall
+    the whole batch indefinitely."""
     state = worker_init()
     while True:
         req_id, args = task_q.get()
         batch = [(req_id, args)]
-        deadline = time.time() + batch_window_sec
+        hard_deadline = time.time() + max_wait_sec
         while len(batch) < max_batch:
-            timeout = deadline - time.time()
+            timeout = min(batch_window_sec, hard_deadline - time.time())
             if timeout <= 0:
                 break
             try:
@@ -46,7 +52,9 @@ def _worker_loop(task_q, result_q, worker_init, worker_batch_fn, batch_window_se
 
 
 class MPBatchPool:
-    def __init__(self, num_workers, worker_init, worker_batch_fn, batch_window_sec=0.05, max_batch=32):
+    def __init__(
+        self, num_workers, worker_init, worker_batch_fn, batch_window_sec=0.05, max_batch=32, max_wait_sec=1.2
+    ):
         self._task_q = _ctx.Queue()
         self._result_q = _ctx.Queue()
         self._pending: dict[str, Future] = {}
@@ -56,7 +64,7 @@ class MPBatchPool:
         for _ in range(num_workers):
             p = _ctx.Process(
                 target=_worker_loop,
-                args=(self._task_q, self._result_q, worker_init, worker_batch_fn, batch_window_sec, max_batch),
+                args=(self._task_q, self._result_q, worker_init, worker_batch_fn, batch_window_sec, max_batch, max_wait_sec),
                 daemon=True,
             )
             p.start()

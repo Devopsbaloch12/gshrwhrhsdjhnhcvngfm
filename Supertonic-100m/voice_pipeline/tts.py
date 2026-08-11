@@ -19,7 +19,14 @@ DEFAULT_VOICE = "F1"  # built-in voices: M1-M5 (male), F1-F5 (female)
 DEFAULT_SPEED = 1.05
 _MAX_BATCH = 32
 _BATCH_WINDOW_SEC = 0.03
-_NUM_WORKERS = 1
+_MAX_WAIT_SEC = 0.8  # caps how long a batch waits for laggards (e.g. slow upstream LLM calls)
+_NUM_WORKERS = 2
+# Supertonic's own default is 8; a 20-concurrent stress-test target earlier dropped
+# this to 4, which measurably hurt clarity. But most of that "unclear" complaint was
+# actually the VAD chopping sentences into garbled fragments (fixed separately in
+# useVoiceCall.ts's MIN_SPEECH_MS), not the step count alone - and 8 costs real
+# latency on every single turn. Split the difference until this is verified by ear.
+_TOTAL_STEPS = 4
 
 
 def _worker_init():
@@ -46,7 +53,6 @@ def _worker_batch(state, items):
     """items: list of (text, voice, speed). Returns list of (clip, sample_rate) in the
     same order as items."""
     from supertonic import Style
-    from supertonic.config import DEFAULT_TOTAL_STEPS
 
     results = [None] * len(items)
     # Supertonic's batched call takes a single scalar speed for the whole batch, so
@@ -65,7 +71,7 @@ def _worker_batch(state, items):
         )
         # Bypass TTS.synthesize()'s single-item text-chunking wrapper and call the
         # batched engine directly so all pending requests run as one GPU forward pass.
-        wav, dur = state["tts"].model(texts, batched_style, DEFAULT_TOTAL_STEPS, speed, "en")
+        wav, dur = state["tts"].model(texts, batched_style, _TOTAL_STEPS, speed, "en")
         for j, idx in enumerate(idxs):
             n_samples = int(round(float(dur[j]) * SAMPLE_RATE))
             clip = np.asarray(wav[j, :n_samples], dtype=np.float32).reshape(-1)
@@ -77,7 +83,7 @@ def _worker_batch(state, items):
 # at module scope) and recursively creating its own pool of grandchild processes.
 _pool = None
 if mp.current_process().name == "MainProcess":
-    _pool = MPBatchPool(_NUM_WORKERS, _worker_init, _worker_batch, _BATCH_WINDOW_SEC, _MAX_BATCH)
+    _pool = MPBatchPool(_NUM_WORKERS, _worker_init, _worker_batch, _BATCH_WINDOW_SEC, _MAX_BATCH, _MAX_WAIT_SEC)
 
 
 def synthesize(

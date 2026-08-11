@@ -3,20 +3,21 @@ import type { AssistantStatus } from "../../types";
 
 interface TranscriptCaptionProps {
   status: AssistantStatus;
-  liveTranscript: string;
   lastQuery: string;
   lastReply: string;
 }
 
-export function TranscriptCaption({ status, liveTranscript, lastQuery, lastReply }: TranscriptCaptionProps) {
+export function TranscriptCaption({ status, lastQuery, lastReply }: TranscriptCaptionProps) {
   const text =
-    status === "listening" && liveTranscript
-      ? liveTranscript
-      : status === "speaking" || status === "thinking"
-        ? lastReply || lastQuery
-        : lastQuery;
+    status === "listening"
+      ? "Listening… just talk, I'll know when you're done"
+      : status === "thinking"
+        ? "Thinking…"
+        : status === "speaking"
+          ? lastReply || lastQuery
+          : lastQuery;
 
-  const placeholder = "Tap the mic and ask me anything";
+  const placeholder = "Tap the mic to start a call";
 
   return (
     <div className="flex min-h-[2.75rem] w-full max-w-sm items-center justify-center px-4 text-center sm:max-w-md">
