@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useMemo, useRef, useState, type FormEvent } from "react";
 import { motion } from "framer-motion";
 import { KeyRound, Send, MicOff, Trash2, MessageCircle } from "lucide-react";
 import { VoiceOrb } from "../components/orb/VoiceOrb";
@@ -43,6 +43,10 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
   // useAudioPlayer re-reads this callback via a ref on every render, so a fresh
   // closure here is exactly what's needed rather than a stale memoized one.
   const onReplayEnded = () => {
+    if (!inCallRef.current) {
+      setStatus("idle");
+      return;
+    }
     if (voiceCall.inCall) {
       setStatus("listening");
       voiceCall.resumeListening();
@@ -50,7 +54,34 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
       setStatus("idle");
     }
   };
-  const { play } = useAudioPlayer(onReplayEnded);
+  const { play, stop } = useAudioPlayer(onReplayEnded);
+
+  // Tracks whether a call is currently live, readable from async callbacks. `inCall`
+  // state alone isn't enough: an in-flight converseAudio() promise captured `inCall ===
+  // true` when it started, so a reply landing after hangup would still play (and the
+  // reply for whatever you said last would start talking *after* you ended the call).
+  // A ref is read at resolve-time instead of capture-time, so late replies get dropped.
+  const inCallRef = useRef(false);
+
+  // A failed/empty utterance (couldn't catch any speech, network hiccup, etc.) used to
+  // fail completely silently mid-call - just a small error text nobody's looking at
+  // while they're listening for a voice reply. This gives an audible cue instead so
+  // "no reply" reads as "try again" rather than "the app is frozen/ignoring me."
+  const beepCtxRef = useRef<AudioContext | null>(null);
+  const playErrorBeep = () => {
+    if (!beepCtxRef.current) beepCtxRef.current = new AudioContext();
+    const ctx = beepCtxRef.current;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.value = 320;
+    gain.gain.setValueAtTime(0.15, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.18);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.18);
+  };
 
   const submitQuery = useCallback(
     async (text: string) => {
@@ -87,19 +118,27 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
     setStatus("thinking");
     try {
       const res = await converseAudio(apiBaseUrl, { audioBlob: blob, voice, emotion, apiKey: apiKeys[0].key });
+      // Hung up while this was in flight - drop the reply instead of talking at
+      // someone who already ended the call.
+      if (!inCallRef.current) return;
       if (!res.user_text) {
-        // nothing intelligible in that utterance - quietly keep the call going
+        // nothing intelligible in that utterance - let the user know instead of
+        // silently going back to listening as if nothing happened
+        playErrorBeep();
         if (voiceCall.inCall) {
           setStatus("listening");
           voiceCall.resumeListening();
         }
         return;
       }
+      setError(null); // clear any stale "didn't catch that" from an earlier turn
       commitTurn(res.user_text, res.reply_text, voice);
       setStatus("speaking");
       play(decodeWavBase64ToUrl(res.audio_base64));
     } catch (err) {
+      if (!inCallRef.current) return;
       setError(err instanceof ApiError ? err.message : "Something went wrong reaching the assistant.");
+      playErrorBeep();
       if (voiceCall.inCall) {
         setStatus("listening");
         voiceCall.resumeListening();
@@ -111,7 +150,10 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
 
   function handleMicToggle() {
     if (voiceCall.inCall) {
+      inCallRef.current = false;
+      stop(); // ending the call must also silence a reply that's mid-playback
       voiceCall.endCall();
+      setError(null);
       setStatus("idle");
       return;
     }
@@ -119,6 +161,8 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
       setError("Generate an API key first to talk to your assistant.");
       return;
     }
+    inCallRef.current = true;
+    setError(null);
     setStatus("listening");
     voiceCall.startCall();
   }

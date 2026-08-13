@@ -8,7 +8,7 @@ choice and pacing are what actually read as "emotional" in a voice assistant.
 EMOTION_PRESETS: dict[str, dict] = {
     "Neutral": {
         "tone": "Respond naturally and conversationally.",
-        "speed": 1.05,
+        "speed": 1.0,
     },
     "Professional": {
         "tone": "Respond in a professional, polished, measured tone - precise, courteous, and to the point.",
@@ -24,7 +24,7 @@ EMOTION_PRESETS: dict[str, dict] = {
     },
     "Friendly": {
         "tone": "Respond in a warm, friendly, casual tone, like talking with a good friend.",
-        "speed": 1.05,
+        "speed": 1.0,
     },
     "Empathetic": {
         "tone": "Respond with warmth and empathy - acknowledge feelings before offering help.",

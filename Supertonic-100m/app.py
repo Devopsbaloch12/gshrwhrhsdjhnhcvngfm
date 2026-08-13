@@ -2,6 +2,7 @@
 Moonshine (STT) -> Groq (LLM) -> Supertonic (TTS), fully hands-free after one click."""
 
 import base64
+import audioop
 import io
 import time
 from pathlib import Path
@@ -12,7 +13,8 @@ import soundfile as sf
 from fastapi import HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response
+from starlette.routing import Route
 
 FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
@@ -254,6 +256,45 @@ async def api_converse_audio_route(request: Request):
     sf.write(buf, speech, speech_sr, format="WAV")
     audio_b64 = base64.b64encode(buf.getvalue()).decode()
     return {"user_text": user_text, "reply_text": reply_text, "audio_base64": audio_b64, "sample_rate": speech_sr}
+
+
+
+# --- telephony bridge routes (STT + TTS for the FE voicebot SelfHostedCore) ---
+async def api_transcriptions_route(request: Request):
+    auth = request.headers.get("authorization", "")
+    key = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+    if not apikeys.is_valid(key):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key.")
+    form = await request.form()
+    f = form.get("file")
+    if f is None or not hasattr(f, "read"):
+        raise HTTPException(status_code=400, detail="file is required.")
+    raw = await f.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="empty file.")
+    audio, sr = sf.read(io.BytesIO(raw), dtype="float32")
+    if getattr(audio, "ndim", 1) > 1:
+        audio = audio.mean(axis=1)
+    text = await run_in_threadpool(stt.transcribe, audio, sr)
+    return {"text": text or ""}
+
+
+async def api_speech_route(request: Request):
+    auth = request.headers.get("authorization", "")
+    key = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+    if not apikeys.is_valid(key):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key.")
+    body = await request.json()
+    text = (body.get("input") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="input must not be empty.")
+    voice = body.get("voice") or tts.DEFAULT_VOICE
+    if voice not in VOICE_CHOICES:
+        voice = tts.DEFAULT_VOICE
+    clip, sr = await run_in_threadpool(tts.synthesize, text, voice, tts.DEFAULT_SPEED)
+    pcm = (np.clip(clip, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+    pcm24, _st = audioop.ratecv(pcm, 2, 1, int(sr), 24000, None)
+    return Response(content=pcm24, media_type="application/octet-stream")
 
 
 CUSTOM_CSS = """
@@ -564,12 +605,14 @@ if __name__ == "__main__":
     fastapi_app.add_api_route("/api/preview", api_preview_route, methods=["POST"])
     fastapi_app.add_api_route("/api/keys/generate", api_generate_key_route, methods=["POST"])
     fastapi_app.add_api_route("/api/keys/revoke", api_revoke_key_route, methods=["POST"])
+    fastapi_app.add_api_route("/audio/transcriptions", api_transcriptions_route, methods=["POST"])
+    fastapi_app.add_api_route("/audio/speech", api_speech_route, methods=["POST"])
 
     if FRONTEND_DIST.is_dir():
         # Serves the built React SPA under /app on this same port, same origin as
-        # /api/* - so the whole thing (Gradio demo at /, API at /api, frontend at
-        # /app) is reachable through a single exposed port instead of needing a
-        # separate origin/port for the frontend dev server.
+        # /api/* - so the whole thing (API at /api, frontend at /app) is reachable
+        # through a single exposed port instead of needing a separate origin/port
+        # for the frontend dev server.
         async def serve_frontend(full_path: str = ""):
             candidate = FRONTEND_DIST / full_path
             if full_path and candidate.is_file():
@@ -578,6 +621,16 @@ if __name__ == "__main__":
 
         fastapi_app.add_api_route("/app", serve_frontend, methods=["GET"])
         fastapi_app.add_api_route("/app/{full_path:path}", serve_frontend, methods=["GET"])
+
+        # The Gradio Blocks UI still owns "/" internally (registered by demo.launch()
+        # above) - insert this redirect ahead of it in the route table so "/" sends
+        # visitors to the React frontend instead of the Gradio demo. Appending would
+        # never fire since Starlette matches routes in registration order and Gradio's
+        # own "/" route was added first.
+        async def redirect_root(request):
+            return RedirectResponse(url="/app")
+
+        fastapi_app.router.routes.insert(0, Route("/", redirect_root, methods=["GET"]))
 
     try:
         # Needed here because the frontend is served from a different origin than this

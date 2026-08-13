@@ -18,7 +18,7 @@ SAMPLE_RATE = 44100
 DEFAULT_VOICE = "F1"  # built-in voices: M1-M5 (male), F1-F5 (female)
 DEFAULT_SPEED = 1.05
 _MAX_BATCH = 32
-_BATCH_WINDOW_SEC = 0.03
+_BATCH_WINDOW_SEC = 0.01
 _MAX_WAIT_SEC = 0.8  # caps how long a batch waits for laggards (e.g. slow upstream LLM calls)
 _NUM_WORKERS = 2
 # Supertonic's own default is 8; a 20-concurrent stress-test target earlier dropped
@@ -26,7 +26,7 @@ _NUM_WORKERS = 2
 # actually the VAD chopping sentences into garbled fragments (fixed separately in
 # useVoiceCall.ts's MIN_SPEECH_MS), not the step count alone - and 8 costs real
 # latency on every single turn. Split the difference until this is verified by ear.
-_TOTAL_STEPS = 4
+_TOTAL_STEPS = 8
 
 
 def _worker_init():
@@ -39,7 +39,16 @@ def _worker_init():
     _loader.DEFAULT_ONNX_PROVIDERS = ["CUDAExecutionProvider", "CPUExecutionProvider"]
     from supertonic import TTS
 
-    return {"tts": TTS(auto_download=True), "voice_cache": {}}
+    # Concurrent requests already land in one batched forward pass per worker (see
+    # _worker_batch), so the parallelism that matters most is threads-within-a-batch,
+    # not worker count. Onnxruntime's default intra-op threads (= all cores) would let
+    # both _NUM_WORKERS processes each grab all 4 cores for themselves when their
+    # batches overlap, oversubscribing 2x. 2 threads x 2 workers = 4, matching the
+    # box's core count exactly with no contention.
+    return {
+        "tts": TTS(auto_download=True, intra_op_num_threads=2, inter_op_num_threads=1),
+        "voice_cache": {},
+    }
 
 
 def _get_style(state, voice: str):

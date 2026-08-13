@@ -13,10 +13,10 @@ import { useCallback, useRef, useState } from "react";
 // getUserMedia + MediaRecorder + Web Audio, so it behaves identically everywhere.
 
 // Trailing quiet required to end an utterance.
-const SILENCE_MS = 350;
+const SILENCE_MS = 1400;
 const MAX_UTTERANCE_MS = 20000; // safety cutoff if someone just keeps talking
 const CHECK_INTERVAL_MS = 50;
-const SPEECH_RMS_THRESHOLD = 0.02;
+const SPEECH_RMS_THRESHOLD = 0.035;
 const SPEECH_CONFIRM_CHECKS = 2; // filters brief pops/clicks from counting as speech starting
 // Utterances shorter than this are noise/false-starts, not real speech - discard them
 // client-side instead of round-tripping a doomed empty-transcript request. Cutting
@@ -112,7 +112,18 @@ export function useVoiceCall({ onUtterance }: UseVoiceCallOptions) {
     if (!supported || inCall) return;
     setPermissionError(null);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Bare `{ audio: true }` leaves the browser's own DSP off, so room noise, fan
+      // hum and speaker bleed all went straight into the recording (and into the VAD's
+      // RMS reading, which is what made it trigger on nothing). These are handled in
+      // native code by the browser before we ever see samples - free, and far better
+      // than anything we'd do to the PCM ourselves.
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          noiseSuppression: true,
+          echoCancellation: true, // also stops the assistant's own playback feeding back in
+          autoGainControl: true, // evens out quiet/far-from-mic speech before STT sees it
+        },
+      });
       streamRef.current = stream;
 
       const audioCtx = new AudioContext();

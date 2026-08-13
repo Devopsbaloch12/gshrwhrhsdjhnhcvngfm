@@ -6,7 +6,7 @@ from silero_vad import load_silero_vad, get_speech_timestamps
 from .audio_utils import to_mono_tensor
 
 SAMPLE_RATE = 16000
-END_SILENCE_SEC = 0.35  # trailing silence required to consider an utterance finished
+END_SILENCE_SEC = 0.8  # trailing silence required to consider an utterance finished
 MAX_UTTERANCE_SEC = 20.0  # safety cutoff if someone just keeps talking
 PREROLL_SEC = 1.0  # how much trailing buffer to keep while waiting for speech to start
 

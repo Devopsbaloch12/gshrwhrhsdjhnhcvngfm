@@ -26,3 +26,5 @@ dist-ssr/
 # runtime/debug artifacts, not part of the app
 backend.log
 scratchpad_*
+tunnel.log
+*.bak.*
