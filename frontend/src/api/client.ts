@@ -33,21 +33,28 @@ async function postJson<T>(baseUrl: string, path: string, body: unknown): Promis
   return res.json() as Promise<T>;
 }
 
+// One prior message in the conversation, in the shape the backend forwards to the LLM.
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
 export function converse(
   baseUrl: string,
-  args: { text: string; voice: string; emotion: string; apiKey: string }
+  args: { text: string; voice: string; emotion: string; apiKey: string; history?: ChatMessage[] }
 ): Promise<ConverseResponse> {
   return postJson<ConverseResponse>(baseUrl, "/api/converse", {
     text: args.text,
     voice: args.voice,
     emotion: args.emotion,
     api_key: args.apiKey,
+    history: args.history ?? [],
   });
 }
 
 export async function converseAudio(
   baseUrl: string,
-  args: { audioBlob: Blob; voice: string; emotion: string; apiKey: string }
+  args: { audioBlob: Blob; voice: string; emotion: string; apiKey: string; history?: ChatMessage[] }
 ): Promise<ConverseAudioResponse> {
   const form = new FormData();
   // Filename extension doesn't matter here - ffmpeg on the backend sniffs the actual
@@ -56,6 +63,8 @@ export async function converseAudio(
   form.append("voice", args.voice);
   form.append("emotion", args.emotion);
   form.append("api_key", args.apiKey);
+  // Multipart carries strings, so history rides along as a JSON blob the backend parses.
+  form.append("history", JSON.stringify(args.history ?? []));
 
   let res: Response;
   try {

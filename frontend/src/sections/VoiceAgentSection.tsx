@@ -12,7 +12,7 @@ import { useAssistantStore } from "../store/assistantStore";
 import { useSettingsStore } from "../store/settingsStore";
 import { useVoiceCall } from "../hooks/useVoiceCall";
 import { useAudioPlayer } from "../hooks/useAudioPlayer";
-import { converse, converseAudio, decodeWavBase64ToUrl, ApiError } from "../api/client";
+import { converse, converseAudio, decodeWavBase64ToUrl, ApiError, type ChatMessage } from "../api/client";
 import { computeHistoryStats } from "../lib/categorize";
 import { formatRelativeTime, truncate } from "../lib/utils";
 import { voiceById } from "../lib/voices";
@@ -35,6 +35,29 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
   const [typedQuery, setTypedQuery] = useState("");
   const stats = useMemo(() => computeHistoryStats(history, 6), [history]);
   const lastEntry = history[0];
+
+  // The assistant had no memory between turns: each request sent only the current
+  // utterance, so "what about tomorrow?" arrived with nothing to refer back to. The
+  // store already holds the transcript - flatten the recent turns into role/content
+  // pairs and send them along. `history` is newest-first, so reverse for chronological
+  // order, and cap it so the prompt (and per-turn latency) stays bounded.
+  const HISTORY_TURNS = 6;
+  const chatHistory = useMemo<ChatMessage[]>(
+    () =>
+      history
+        .slice(0, HISTORY_TURNS)
+        .reverse()
+        .flatMap((entry) => [
+          { role: "user" as const, content: entry.query },
+          { role: "assistant" as const, content: entry.reply },
+        ]),
+    [history]
+  );
+  // Read at call time from a ref: submitUtterance is invoked from the VAD hook's own
+  // callback, which would otherwise close over whatever chatHistory was when the call
+  // started and replay a stale (or empty) transcript on every later turn.
+  const chatHistoryRef = useRef<ChatMessage[]>(chatHistory);
+  chatHistoryRef.current = chatHistory;
 
   // After the assistant's reply finishes playing: resume listening if the call is
   // still live, otherwise settle back to idle (e.g. after a one-off typed query).
@@ -93,7 +116,13 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
       }
       setStatus("thinking");
       try {
-        const res = await converse(apiBaseUrl, { text: trimmed, voice, emotion, apiKey: apiKeys[0].key });
+        const res = await converse(apiBaseUrl, {
+          text: trimmed,
+          voice,
+          emotion,
+          apiKey: apiKeys[0].key,
+          history: chatHistoryRef.current,
+        });
         commitTurn(trimmed, res.reply_text, voice);
         setStatus("speaking");
         play(decodeWavBase64ToUrl(res.audio_base64));
@@ -117,7 +146,13 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
     }
     setStatus("thinking");
     try {
-      const res = await converseAudio(apiBaseUrl, { audioBlob: blob, voice, emotion, apiKey: apiKeys[0].key });
+      const res = await converseAudio(apiBaseUrl, {
+        audioBlob: blob,
+        voice,
+        emotion,
+        apiKey: apiKeys[0].key,
+        history: chatHistoryRef.current,
+      });
       // Hung up while this was in flight - drop the reply instead of talking at
       // someone who already ended the call.
       if (!inCallRef.current) return;

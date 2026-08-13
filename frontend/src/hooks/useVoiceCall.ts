@@ -16,7 +16,7 @@ import { useCallback, useRef, useState } from "react";
 const SILENCE_MS = 1400;
 const MAX_UTTERANCE_MS = 20000; // safety cutoff if someone just keeps talking
 const CHECK_INTERVAL_MS = 50;
-const SPEECH_RMS_THRESHOLD = 0.035;
+const SPEECH_RMS_THRESHOLD = 0.02;
 const SPEECH_CONFIRM_CHECKS = 2; // filters brief pops/clicks from counting as speech starting
 // Utterances shorter than this are noise/false-starts, not real speech - discard them
 // client-side instead of round-tripping a doomed empty-transcript request. Cutting

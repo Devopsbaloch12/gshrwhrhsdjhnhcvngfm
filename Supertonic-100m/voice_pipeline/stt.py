@@ -113,6 +113,12 @@ def transcribe(audio: np.ndarray, sr: int) -> str:
 
     fut = _pool.submit(wav.numpy())
     text = fut.result()
-    if _looks_like_hallucination(text):
+    filtered = _looks_like_hallucination(text)
+    print(
+        "[STT] samples=%d dur=%.2fs rms=%.4f raw=%r filtered=%s"
+        % (wav.numel(), wav.numel() / SAMPLE_RATE, float(wav.abs().mean()), text[:120], filtered),
+        flush=True,
+    )
+    if filtered:
         return ""
     return text

@@ -4,6 +4,7 @@ Moonshine (STT) -> Groq (LLM) -> Supertonic (TTS), fully hands-free after one cl
 import base64
 import audioop
 import io
+import json
 import time
 from pathlib import Path
 
@@ -111,20 +112,56 @@ def generate_api_key():
     return apikeys.generate_key(label="dashboard")
 
 
-def _run_converse(user_text: str, voice: str, emotion: str) -> tuple[str, np.ndarray, int]:
+# How many prior messages (user+assistant combined) to replay to the LLM. Each turn
+# contributes two, so this is ~6 exchanges - enough for "what about tomorrow?" style
+# follow-ups without growing the prompt (and per-turn latency) without bound.
+_MAX_HISTORY_MESSAGES = 12
+
+
+def _coerce_history(raw) -> list[dict]:
+    """Normalise client-supplied conversation history into the role/content shape the
+    LLM client expects. The client is untrusted, so anything malformed is dropped rather
+    than assumed well-formed - a bad history should cost context, not fail the turn."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return []
+    if not isinstance(raw, list):
+        return []
+    cleaned: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        content = item.get("content")
+        if role not in ("user", "assistant"):
+            continue
+        if not isinstance(content, str) or not content.strip():
+            continue
+        cleaned.append({"role": role, "content": content.strip()})
+    return cleaned[-_MAX_HISTORY_MESSAGES:]
+
+
+def _run_converse(
+    user_text: str, voice: str, emotion: str, history: list[dict] | None = None
+) -> tuple[str, np.ndarray, int]:
     """Text-in -> LLM reply -> TTS audio. Skips STT since the input is already text.
     Synchronous/blocking - callers should run this off the event loop."""
     if voice not in VOICE_CHOICES:
         voice = tts.DEFAULT_VOICE
     if emotion not in EMOTION_PRESETS:
         emotion = DEFAULT_EMOTION
-    reply_text = llm.reply([{"role": "user", "content": user_text}], emotion=emotion)
+    messages = (history or []) + [{"role": "user", "content": user_text}]
+    reply_text = llm.reply(messages, emotion=emotion)
     speed = EMOTION_PRESETS[emotion]["speed"]
     speech, speech_sr = tts.synthesize(reply_text, voice=voice, speed=speed)
     return reply_text, speech, speech_sr
 
 
-def _run_converse_audio(raw_audio_bytes: bytes, voice: str, emotion: str) -> tuple[str, str, np.ndarray, int]:
+def _run_converse_audio(
+    raw_audio_bytes: bytes, voice: str, emotion: str, history: list[dict] | None = None
+) -> tuple[str, str, np.ndarray, int]:
     """Audio-in -> STT -> LLM reply -> TTS audio. Mirrors _run_converse but starts from
     raw browser-recorded bytes instead of already-typed text. Synchronous/blocking -
     callers should run this off the event loop."""
@@ -139,7 +176,8 @@ def _run_converse_audio(raw_audio_bytes: bytes, voice: str, emotion: str) -> tup
         voice = tts.DEFAULT_VOICE
     if emotion not in EMOTION_PRESETS:
         emotion = DEFAULT_EMOTION
-    reply_text = llm.reply([{"role": "user", "content": user_text}], emotion=emotion)
+    messages = (history or []) + [{"role": "user", "content": user_text}]
+    reply_text = llm.reply(messages, emotion=emotion)
     speed = EMOTION_PRESETS[emotion]["speed"]
     speech, speech_sr = tts.synthesize(reply_text, voice=voice, speed=speed)
     return user_text, reply_text, speech, speech_sr
@@ -216,7 +254,10 @@ async def api_converse_route(request: Request):
     voice = body.get("voice", tts.DEFAULT_VOICE)
     emotion = body.get("emotion", DEFAULT_EMOTION)
 
-    reply_text, speech, speech_sr = await run_in_threadpool(_run_converse, user_text, voice, emotion)
+    history = _coerce_history(body.get("history"))
+    reply_text, speech, speech_sr = await run_in_threadpool(
+        _run_converse, user_text, voice, emotion, history
+    )
 
     buf = io.BytesIO()
     sf.write(buf, speech, speech_sr, format="WAV")
@@ -247,7 +288,7 @@ async def api_converse_audio_route(request: Request):
 
     try:
         user_text, reply_text, speech, speech_sr = await run_in_threadpool(
-            _run_converse_audio, raw_bytes, voice, emotion
+            _run_converse_audio, raw_bytes, voice, emotion, _coerce_history(form.get("history"))
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
