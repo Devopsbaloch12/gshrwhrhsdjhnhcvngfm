@@ -4,6 +4,7 @@ See voice_pipeline/tts.py for why this uses separate processes (each with its ow
 CUDA context) instead of threads sharing one model/session.
 """
 
+import difflib
 import multiprocessing as mp
 
 import numpy as np
@@ -45,6 +46,73 @@ _HALLUCINATION_ARTIFACTS = {
 
 
 _STRIP_CHARS = ".,!?-—–'\"♪ "
+
+
+# --- domain vocabulary correction -------------------------------------------------
+# A 27M-parameter model has no representation for brand/product names it never saw in
+# training, so it emits the nearest thing that sounds right: "RSMeans" came back as
+# "Irish mean", "arrest mean", "iris mean", "RSME" and "arsenine" across one session.
+# No decoding parameter reaches that token, so the repair happens on the text after.
+#
+# Matching is deliberately split in two, because fuzzy-matching the misheard spellings
+# turned out to be unsafe: "i mean" scores 0.80 and "is mean" 0.88 against them, i.e.
+# inside the range real manglings occupy, so an ordinary sentence ("I mean, this is the
+# main reason") got rewritten into the brand name - worse than the bug being fixed.
+#   * listed misspellings must match exactly (they are known, no guessing needed)
+#   * anything else must be very close to the canonical spelling itself
+# Measured over the real transcripts plus common English near-misses, that pair
+# recovers every listed variant with no false rewrites.
+#
+# Add terms as they come up: (canonical, [ways it has actually been misheard]).
+_DOMAIN_TERMS: list[tuple[str, list[str]]] = [
+    (
+        "RSMeans",
+        [
+            "rs means", "rs mean", "rsmean", "rsme", "rsmeans",
+            "arsenine", "arrest mean", "irish mean", "iris mean",
+            "arsene means", "our essmeans",
+        ],
+    ),
+]
+
+# Only for phrases not on the list above. High on purpose - "means" alone sits at 0.83,
+# so anything lower starts eating ordinary words.
+_CANONICAL_FUZZY_THRESHOLD = 0.88
+_MAX_TERM_WORDS = 3
+
+
+def _norm(text: str) -> str:
+    return " ".join("".join(ch for ch in text.lower() if ch.isalnum() or ch.isspace()).split())
+
+
+def _apply_domain_vocab(text: str) -> str:
+    """Rewrite known mishearings of domain terms back to their canonical spelling.
+
+    Scans 3-, 2- then 1-word windows so a two-word mangling ("arrest mean") is repaired
+    before a single word inside it can be."""
+    if not text.strip():
+        return text
+    words = text.split()
+    for canonical, variants in _DOMAIN_TERMS:
+        exact = {_norm(v) for v in variants} | {_norm(canonical)}
+        canon_norm = _norm(canonical)
+        for size in range(_MAX_TERM_WORDS, 0, -1):
+            i = 0
+            while i + size <= len(words):
+                window = " ".join(words[i : i + size])
+                trailing = ""
+                while window and window[-1] in ".,!?;:":
+                    trailing = window[-1] + trailing
+                    window = window[:-1]
+                probe = _norm(window)
+                if probe and (
+                    probe in exact
+                    or difflib.SequenceMatcher(None, probe, canon_norm).ratio()
+                    >= _CANONICAL_FUZZY_THRESHOLD
+                ):
+                    words[i : i + size] = [canonical + trailing]
+                i += 1
+    return " ".join(words)
 
 
 def _looks_like_hallucination(text: str) -> bool:
@@ -121,4 +189,4 @@ def transcribe(audio: np.ndarray, sr: int) -> str:
     )
     if filtered:
         return ""
-    return text
+    return _apply_domain_vocab(text)

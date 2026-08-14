@@ -25,8 +25,29 @@ const SPEECH_CONFIRM_CHECKS = 2; // filters brief pops/clicks from counting as s
 // silently looped "Thinking" -> "Listening" with no reply ever appearing.
 const MIN_SPEECH_MS = 300;
 
+// Barge-in: talking over the assistant while it's speaking should cut it off, the way
+// interrupting a person does. This is deliberately harder to trigger than ordinary
+// speech detection above, because a false positive here is much worse - it would chop
+// off the assistant's reply for a cough or a door closing.
+//
+// An earlier attempt at this fired instantly and constantly: getUserMedia ran without
+// echoCancellation, so the mic picked the assistant's own voice back up out of the
+// speakers and the agent interrupted itself within ~100ms of starting every reply.
+// Echo cancellation (enabled in startCall) removes that feedback path; the higher
+// threshold and longer confirmation window below absorb whatever residue leaks past it
+// on speakerphone-ish setups.
+const BARGE_IN_RMS_THRESHOLD = 0.05; // vs 0.02 to merely start an utterance
+const BARGE_IN_CONFIRM_CHECKS = 6; // ~300ms sustained, vs ~100ms
+// Playback and the tail of the user's own speech overlap for a moment at the handover,
+// so ignore the first stretch of every reply rather than letting the user interrupt
+// themselves.
+const BARGE_IN_GRACE_MS = 500;
+
 interface UseVoiceCallOptions {
   onUtterance: (blob: Blob) => void;
+  // Fired when the user talks over the assistant. The caller decides what that means
+  // (stop playback, start listening again) - this hook only detects it.
+  onInterrupt?: () => void;
 }
 
 function pickMimeType(): string | undefined {
@@ -35,7 +56,7 @@ function pickMimeType(): string | undefined {
   return candidates.find((type) => MediaRecorder.isTypeSupported(type));
 }
 
-export function useVoiceCall({ onUtterance }: UseVoiceCallOptions) {
+export function useVoiceCall({ onUtterance, onInterrupt }: UseVoiceCallOptions) {
   const supported =
     typeof navigator !== "undefined" &&
     !!navigator.mediaDevices?.getUserMedia &&
@@ -57,8 +78,12 @@ export function useVoiceCall({ onUtterance }: UseVoiceCallOptions) {
   const loudStreakRef = useRef(0);
   const discardRef = useRef(false);
   const busyRef = useRef(false); // paused while a reply is being fetched/played, so we don't hear ourselves
+  const bargeInStreakRef = useRef(0);
+  const busySinceRef = useRef(0);
   const onUtteranceRef = useRef(onUtterance);
   onUtteranceRef.current = onUtterance;
+  const onInterruptRef = useRef(onInterrupt);
+  onInterruptRef.current = onInterrupt;
 
   const stopSegmentRecorder = useCallback(() => {
     const rec = recorderRef.current;
@@ -100,11 +125,14 @@ export function useVoiceCall({ onUtterance }: UseVoiceCallOptions) {
   // playback finishing, not just on the network call finishing.
   const resumeListening = useCallback(() => {
     busyRef.current = false;
+    bargeInStreakRef.current = 0;
     if (streamRef.current) startSegmentRecorder();
   }, [startSegmentRecorder]);
 
   const pauseForReply = useCallback(() => {
     busyRef.current = true;
+    busySinceRef.current = performance.now();
+    bargeInStreakRef.current = 0;
     stopSegmentRecorder();
   }, [stopSegmentRecorder]);
 
@@ -140,7 +168,6 @@ export function useVoiceCall({ onUtterance }: UseVoiceCallOptions) {
 
       const buf = new Uint8Array(analyser.fftSize);
       intervalRef.current = window.setInterval(() => {
-        if (busyRef.current || !recorderRef.current) return;
         analyser.getByteTimeDomainData(buf);
         let sumSquares = 0;
         for (let i = 0; i < buf.length; i++) {
@@ -149,6 +176,24 @@ export function useVoiceCall({ onUtterance }: UseVoiceCallOptions) {
         }
         const rms = Math.sqrt(sumSquares / buf.length);
         const now = performance.now();
+
+        if (busyRef.current) {
+          // No segment recorder runs while the assistant holds the floor, but the
+          // analyser is wired to the raw stream rather than the recorder, so it can
+          // still watch for the user cutting in.
+          if (now - busySinceRef.current < BARGE_IN_GRACE_MS) return;
+          if (rms > BARGE_IN_RMS_THRESHOLD) {
+            bargeInStreakRef.current += 1;
+            if (bargeInStreakRef.current >= BARGE_IN_CONFIRM_CHECKS) {
+              bargeInStreakRef.current = 0;
+              onInterruptRef.current?.();
+            }
+          } else {
+            bargeInStreakRef.current = 0;
+          }
+          return;
+        }
+        if (!recorderRef.current) return;
         const loud = rms > SPEECH_RMS_THRESHOLD;
 
         if (loud) {

@@ -59,6 +59,12 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
   const chatHistoryRef = useRef<ChatMessage[]>(chatHistory);
   chatHistoryRef.current = chatHistory;
 
+  // Bumped whenever the current turn stops being the one we care about (barge-in, or
+  // hanging up). A reply that resolves against a stale id is discarded instead of
+  // played, so interrupting can't be undone a second later by the answer to the
+  // question you already talked over.
+  const turnIdRef = useRef(0);
+
   // After the assistant's reply finishes playing: resume listening if the call is
   // still live, otherwise settle back to idle (e.g. after a one-off typed query).
   // Deliberately NOT wrapped in useCallback: it must close over the *current*
@@ -78,6 +84,17 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
     }
   };
   const { play, stop } = useAudioPlayer(onReplayEnded);
+
+  // The user started talking over the assistant: cut the reply off and go straight
+  // back to listening, so they can just keep speaking. Not useCallback-memoized -
+  // useVoiceCall reads it through a ref each render and needs the current closure.
+  const handleInterrupt = () => {
+    if (!inCallRef.current) return;
+    turnIdRef.current += 1; // whatever is in flight no longer applies
+    stop();
+    setStatus("listening");
+    voiceCall.resumeListening();
+  };
 
   // Tracks whether a call is currently live, readable from async callbacks. `inCall`
   // state alone isn't enough: an in-flight converseAudio() promise captured `inCall ===
@@ -145,6 +162,7 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
       return;
     }
     setStatus("thinking");
+    const turnId = ++turnIdRef.current;
     try {
       const res = await converseAudio(apiBaseUrl, {
         audioBlob: blob,
@@ -153,9 +171,9 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
         apiKey: apiKeys[0].key,
         history: chatHistoryRef.current,
       });
-      // Hung up while this was in flight - drop the reply instead of talking at
-      // someone who already ended the call.
-      if (!inCallRef.current) return;
+      // Hung up, or talked over this turn, while it was in flight - drop the reply
+      // instead of talking at someone who already moved on.
+      if (!inCallRef.current || turnId !== turnIdRef.current) return;
       if (!res.user_text) {
         // nothing intelligible in that utterance - let the user know instead of
         // silently going back to listening as if nothing happened
@@ -171,7 +189,7 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
       setStatus("speaking");
       play(decodeWavBase64ToUrl(res.audio_base64));
     } catch (err) {
-      if (!inCallRef.current) return;
+      if (!inCallRef.current || turnId !== turnIdRef.current) return;
       setError(err instanceof ApiError ? err.message : "Something went wrong reaching the assistant.");
       playErrorBeep();
       if (voiceCall.inCall) {
@@ -181,11 +199,12 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
     }
   };
 
-  const voiceCall = useVoiceCall({ onUtterance: submitUtterance });
+  const voiceCall = useVoiceCall({ onUtterance: submitUtterance, onInterrupt: handleInterrupt });
 
   function handleMicToggle() {
     if (voiceCall.inCall) {
       inCallRef.current = false;
+      turnIdRef.current += 1; // invalidate any in-flight reply
       stop(); // ending the call must also silence a reply that's mid-playback
       voiceCall.endCall();
       setError(null);
