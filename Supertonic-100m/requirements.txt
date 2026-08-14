@@ -8,3 +8,4 @@ numpy
 gradio
 openai
 python-dotenv
+faster-whisper

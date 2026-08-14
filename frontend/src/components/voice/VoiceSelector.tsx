@@ -1,5 +1,6 @@
-import { useState } from "react";
-import { VOICES } from "../../lib/voices";
+import { useMemo, useState } from "react";
+import { resolveVoices } from "../../lib/voices";
+import { useServerStore } from "../../store/serverStore";
 import { VoiceCard } from "./VoiceCard";
 import { SectionTitle } from "../common/SectionTitle";
 import { useSettingsStore } from "../../store/settingsStore";
@@ -17,9 +18,13 @@ export function VoiceSelector() {
   const [previewError, setPreviewError] = useState<string | null>(null);
   const { play } = useAudioPlayer();
 
+  const config = useServerStore((s) => s.config);
+  const connection = useServerStore((s) => s.connection);
+  const voices = useMemo(() => resolveVoices(config), [config]);
+
   const hasKey = apiKeys.length > 0;
-  const female = VOICES.filter((v) => v.gender === "female");
-  const male = VOICES.filter((v) => v.gender === "male");
+  const female = voices.filter((v) => v.gender === "female");
+  const male = voices.filter((v) => v.gender === "male");
 
   async function handlePreview(voiceId: string) {
     if (!hasKey) {
@@ -70,6 +75,11 @@ export function VoiceSelector() {
           ))}
         </div>
       </div>
+      {connection === "offline" && (
+        <p className="text-xs text-amber-300/90">
+          Showing the last known voices — the backend isn’t reachable right now.
+        </p>
+      )}
       {previewError && <p className="text-xs text-rose-400">{previewError}</p>}
     </div>
   );

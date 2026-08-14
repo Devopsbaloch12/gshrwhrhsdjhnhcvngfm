@@ -1,9 +1,11 @@
+import { useMemo } from "react";
 import { GlassCard } from "../components/common/GlassCard";
 import { SectionTitle } from "../components/common/SectionTitle";
 import { SectionHeader } from "../components/common/SectionHeader";
 import { VoiceSelector } from "../components/voice/VoiceSelector";
-import { EMOTIONS } from "../lib/voices";
+import { resolveEmotions } from "../lib/voices";
 import { useSettingsStore } from "../store/settingsStore";
+import { useServerStore } from "../store/serverStore";
 import { cn } from "../lib/utils";
 
 export function VoiceSection() {
@@ -11,6 +13,8 @@ export function VoiceSection() {
   const setEmotion = useSettingsStore((s) => s.setEmotion);
   const apiBaseUrl = useSettingsStore((s) => s.apiBaseUrl);
   const setApiBaseUrl = useSettingsStore((s) => s.setApiBaseUrl);
+  const config = useServerStore((s) => s.config);
+  const emotions = useMemo(() => resolveEmotions(config), [config]);
 
   return (
     <div className="flex flex-col gap-8">
@@ -23,7 +27,7 @@ export function VoiceSection() {
       <GlassCard className="flex flex-col gap-3 p-5">
         <SectionTitle>Tone</SectionTitle>
         <div className="flex flex-wrap gap-2">
-          {EMOTIONS.map((option) => (
+          {emotions.map((option) => (
             <button
               key={option}
               type="button"

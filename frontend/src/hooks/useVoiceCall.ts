@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from "react";
+import { useMotionValue } from "framer-motion";
 
 // A real hands-free "call": tap once to start, then this auto-detects when you stop
 // talking (simple energy-based VAD on the raw mic stream) and submits each utterance
@@ -65,6 +66,9 @@ export function useVoiceCall({ onUtterance, onInterrupt }: UseVoiceCallOptions) 
 
   const [inCall, setInCall] = useState(false);
   const [permissionError, setPermissionError] = useState<string | null>(null);
+  // Live mic amplitude, already computed here for the VAD. Published as a MotionValue so
+  // the UI can show the user's own voice moving the orb without a re-render per sample.
+  const micLevel = useMotionValue(0);
 
   const streamRef = useRef<MediaStream | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -77,6 +81,12 @@ export function useVoiceCall({ onUtterance, onInterrupt }: UseVoiceCallOptions) 
   const lastLoudAtRef = useRef<number | null>(null);
   const loudStreakRef = useRef(0);
   const discardRef = useRef(false);
+  // MediaRecorder.stop() finishes asynchronously, so the final onstop fires *after*
+  // endCall() has returned and the UI has already settled to idle. Without this flag
+  // that last partial segment was submitted as a normal utterance: status flipped to
+  // "thinking", and the reply was then dropped by the caller's own hung-up guard, so
+  // nothing ever moved it off "thinking" again. Hanging up must discard that tail.
+  const endedRef = useRef(false);
   const busyRef = useRef(false); // paused while a reply is being fetched/played, so we don't hear ourselves
   const bargeInStreakRef = useRef(0);
   const busySinceRef = useRef(0);
@@ -103,6 +113,11 @@ export function useVoiceCall({ onUtterance, onInterrupt }: UseVoiceCallOptions) 
     recorder.onstop = () => {
       const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" });
       chunksRef.current = [];
+      if (endedRef.current) {
+        // Call is over - drop whatever was mid-recording and don't restart a segment.
+        discardRef.current = false;
+        return;
+      }
       if (discardRef.current) {
         // false start / noise blip, too short to be real speech - drop it and keep
         // listening in a fresh segment instead of round-tripping a doomed request
@@ -163,6 +178,7 @@ export function useVoiceCall({ onUtterance, onInterrupt }: UseVoiceCallOptions) 
       analyserRef.current = analyser;
 
       busyRef.current = false;
+      endedRef.current = false;
       startSegmentRecorder();
       setInCall(true);
 
@@ -175,6 +191,7 @@ export function useVoiceCall({ onUtterance, onInterrupt }: UseVoiceCallOptions) 
           sumSquares += v * v;
         }
         const rms = Math.sqrt(sumSquares / buf.length);
+        micLevel.set(rms);
         const now = performance.now();
 
         if (busyRef.current) {
@@ -223,14 +240,16 @@ export function useVoiceCall({ onUtterance, onInterrupt }: UseVoiceCallOptions) 
         }
       }, CHECK_INTERVAL_MS);
     } catch (err) {
+      micLevel.set(0);
       setPermissionError(
         err instanceof Error ? err.message : "Microphone access was denied or unavailable."
       );
       setInCall(false);
     }
-  }, [supported, inCall, startSegmentRecorder, pauseForReply]);
+  }, [supported, inCall, startSegmentRecorder, pauseForReply, micLevel]);
 
   const endCall = useCallback(() => {
+    endedRef.current = true;
     if (intervalRef.current !== null) {
       window.clearInterval(intervalRef.current);
       intervalRef.current = null;
@@ -242,8 +261,18 @@ export function useVoiceCall({ onUtterance, onInterrupt }: UseVoiceCallOptions) 
     audioCtxRef.current = null;
     analyserRef.current = null;
     busyRef.current = false;
+    micLevel.set(0);
     setInCall(false);
-  }, [stopSegmentRecorder]);
+  }, [stopSegmentRecorder, micLevel]);
 
-  return { supported, inCall, permissionError, startCall, endCall, pauseForReply, resumeListening };
+  return {
+    supported,
+    inCall,
+    permissionError,
+    micLevel,
+    startCall,
+    endCall,
+    pauseForReply,
+    resumeListening,
+  };
 }

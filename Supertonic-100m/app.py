@@ -171,7 +171,11 @@ def _run_converse_audio(
         raise ValueError(f"Couldn't process that recording: {exc}") from exc
     user_text = stt.transcribe(audio_np, sr)
     if not user_text:
-        raise ValueError("Didn't catch any speech in that recording - try again.")
+        # Not an error: the input gate rejecting silence/noise is the STT stage working
+        # as intended, and it happens routinely mid-call. Raising here turned every such
+        # clip into a 422 the dashboard rendered as a red failure. Report it as an empty
+        # turn instead and let the client decide how to prompt the user.
+        return "", "", np.zeros(0, dtype=np.float32), tts.SAMPLE_RATE
     if voice not in VOICE_CHOICES:
         voice = tts.DEFAULT_VOICE
     if emotion not in EMOTION_PRESETS:
@@ -210,6 +214,31 @@ async def api_preview_route(request: Request):
     sf.write(buf, speech, speech_sr, format="WAV")
     audio_b64 = base64.b64encode(buf.getvalue()).decode()
     return {"audio_base64": audio_b64, "sample_rate": speech_sr}
+
+
+async def api_config_route(request: Request):
+    """GET /api/config - what this backend actually supports, so clients don't have to
+    keep their own hand-maintained copy of it. The dashboard used to hardcode the voice
+    and tone lists in src/lib/voices.ts, which meant adding a voice here silently never
+    appeared in the UI (and a removed one stayed selectable until it 400'd).
+
+    Unauthenticated on purpose: it's the same non-sensitive capability list the UI needs
+    before the user has generated a key, and it exposes nothing a caller couldn't learn
+    by trying each value against /api/preview."""
+    return {
+        "voices": [
+            {"id": v, "gender": "female" if v.startswith("F") else "male"}
+            for v in VOICE_CHOICES
+        ],
+        "emotions": [
+            {"id": name, "speed": preset["speed"]} for name, preset in EMOTION_PRESETS.items()
+        ],
+        "default_voice": tts.DEFAULT_VOICE,
+        "default_emotion": DEFAULT_EMOTION,
+        # Lets the client show a real connection state instead of inferring "connected"
+        # from whether a key happens to be saved in its own local storage.
+        "status": "ok",
+    }
 
 
 async def api_generate_key_route(request: Request):
@@ -292,6 +321,12 @@ async def api_converse_audio_route(request: Request):
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+
+    if not user_text:
+        # Nothing intelligible in the clip - an empty turn, not a failure. There is no
+        # reply to speak, so send back no audio rather than a zero-length WAV the client
+        # would have to special-case anyway.
+        return {"user_text": "", "reply_text": "", "audio_base64": "", "sample_rate": speech_sr}
 
     buf = io.BytesIO()
     sf.write(buf, speech, speech_sr, format="WAV")
@@ -641,6 +676,7 @@ if __name__ == "__main__":
         server_name="0.0.0.0", server_port=7860, share=False,
         theme=THEME, css=CUSTOM_CSS, prevent_thread_lock=True, footer_links=[]
     )
+    fastapi_app.add_api_route("/api/config", api_config_route, methods=["GET"])
     fastapi_app.add_api_route("/api/converse", api_converse_route, methods=["POST"])
     fastapi_app.add_api_route("/api/converse_audio", api_converse_audio_route, methods=["POST"])
     fastapi_app.add_api_route("/api/preview", api_preview_route, methods=["POST"])
@@ -683,7 +719,9 @@ if __name__ == "__main__":
         fastapi_app.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],
-            allow_methods=["POST", "OPTIONS"],
+            # GET is needed for /api/config - without it a cross-origin dashboard
+            # (separate proxy subdomain per port) can't read the capability list.
+            allow_methods=["GET", "POST", "OPTIONS"],
             allow_headers=["Content-Type"],
         )
     except RuntimeError as exc:

@@ -1,58 +1,80 @@
-"""Moonshine (tiny) speech-to-text wrapper with multi-process batching.
+"""Whisper (faster-whisper / CTranslate2) speech-to-text wrapper with multi-process batching.
 
-See voice_pipeline/tts.py for why this uses separate processes (each with its own
-CUDA context) instead of threads sharing one model/session.
+Was moonshine-tiny. It ran at 0.04x realtime on this 4-core CPU box - and transcribed
+clearly-audible speech into unrelated sentences ("He was born in 1889, and was born on
+September 11, 1980." at an amplitude identical to transcripts that came out perfect).
+27M parameters is simply not enough for real mic audio; it handles "Hello, can you hear
+me?" and invents the rest. Those invented turns then went into the conversation history
+as if the user had said them, so the assistant answered questions nobody asked.
+
+small.en measured at 0.12x realtime here (0.7s for a 6s utterance), so the accuracy is
+bought with latency the box was never using.
+
+See voice_pipeline/tts.py for why this uses separate processes rather than threads.
 """
 
 import difflib
 import multiprocessing as mp
+import os
+import time
 
 import numpy as np
 
 from .audio_utils import to_mono_tensor
 from .mp_batch_pool import MPBatchPool
 
-MODEL_ID = "UsefulSensors/moonshine-tiny"
+MODEL_ID = os.environ.get("STT_MODEL", "small.en")
 SAMPLE_RATE = 16000
-_MAX_BATCH = 32
+_MAX_BATCH = 8
 _BATCH_WINDOW_SEC = 0.01
-# The model's own generation_config caps total length at 194, so asking for 256 new
-# tokens was self-contradictory (transformers warned about it on every single call) and
-# let a degenerate decode run all the way to the cap. Staying under it keeps generation
-# inside the range the model was actually configured for.
-_MAX_NEW_TOKENS = 180
-# Greedy decoding (num_beams=1) commits to the highest-probability token at each step,
-# which on noisy input locks in early mistakes it can't back out of - measured here as
-# "the quick round box" for "the quick brown fox" at 5dB SNR. Beam search keeps several
-# candidate transcripts alive and picks the best-scoring whole sequence, which recovers
-# that case. Costs ~40ms per utterance on this box - cheap next to re-asking the user.
-_NUM_BEAMS = 5
-# Fed silence or room noise, the model doesn't return nothing - it falls into a
-# repetition loop and emits junk (u266au266au266au266a... or replacement chars) until it hits the
-# length cap. That output is non-empty, so it sails through the caller's empty-transcript
-# check and gets handed to the LLM, which then answers a question the user never asked.
-# Blocking repeated n-grams and penalising repetition collapses those loops.
-_NO_REPEAT_NGRAM = 3
-_REPETITION_PENALTY = 1.2
+# CTranslate2 parallelises within a single transcribe() call, so threads-per-worker
+# matters more here than worker count. 2 x 2 = the box's 4 cores, no oversubscription.
+_NUM_WORKERS = 2
+_CPU_THREADS = 2
+_BEAM_SIZE = 5
 
-# What survives the above on non-speech input is a short stock phrase rather than a
-# repetition loop - the model's "I heard nothing" attractor. These are never plausible
-# as a real utterance to a voice assistant, so treat them as silence instead of passing
-# them on. Compared case-insensitively with surrounding punctuation stripped.
+# --- Whisper-specific hallucination controls --------------------------------------
+# Whisper's failure mode on non-speech is the same in kind as Moonshine's (it emits
+# fluent invented text rather than nothing), but unlike Moonshine it reports how likely
+# a segment was to be silence, so the junk can be dropped on the model's own evidence
+# instead of guessed at from the text afterwards.
+_NO_SPEECH_THRESHOLD = 0.6
+_LOGPROB_THRESHOLD = -1.0
+_COMPRESSION_RATIO_THRESHOLD = 2.4
+# Per-segment: drop anything the model itself thinks was probably silence, even when the
+# clip as a whole passed.
+_SEGMENT_NO_SPEECH_MAX = 0.7
+
+# Text-level backstop, unchanged in intent from the Moonshine version: these stock
+# phrases are what an ASR model emits for "I heard nothing" and are never a plausible
+# thing to say to a voice assistant. Compared case-insensitively, punctuation stripped.
 _HALLUCINATION_ARTIFACTS = {
     "", "you", "thank you", "thanks for watching", "bye", "the", "a", "i",
     "thank you for watching", "please subscribe", "subtitles by the amara.org community",
+    "thanks for watching!", "subscribe", "www.mooji.org", "transcription by castingwords",
 }
-
 
 _STRIP_CHARS = ".,!?-—–'\"♪ "
 
+# --- input gating -----------------------------------------------------------------
+# Reject the audio before transcribing rather than trying to recognise invented text
+# afterwards. Calibrated on real session logs (mean absolute amplitude): genuine speech
+# 0.015-0.035, the clips that produced fabricated transcripts 0.0002-0.0007.
+_MIN_LEVEL = 0.005
+_MIN_DURATION_SEC = 0.3
+
+# --- failure capture ---------------------------------------------------------------
+# Set STT_DEBUG_DIR to a writable path to keep a copy of every utterance alongside what
+# it was transcribed as. Without the actual audio there is no way to tell a bad model
+# from a bad microphone signal - both look like "it wrote something I didn't say".
+_DEBUG_DIR = os.environ.get("STT_DEBUG_DIR", "").strip()
+
 
 # --- domain vocabulary correction -------------------------------------------------
-# A 27M-parameter model has no representation for brand/product names it never saw in
-# training, so it emits the nearest thing that sounds right: "RSMeans" came back as
-# "Irish mean", "arrest mean", "iris mean", "RSME" and "arsenine" across one session.
-# No decoding parameter reaches that token, so the repair happens on the text after.
+# A small model has no representation for brand/product names it never saw in training,
+# so it emits the nearest thing that sounds right: "RSMeans" came back as "Irish mean",
+# "arrest mean", "iris mean", "RSME" and "arsenine" across one session. No decoding
+# parameter reaches that token, so the repair happens on the text after.
 #
 # Matching is deliberately split in two, because fuzzy-matching the misheard spellings
 # turned out to be unsafe: "i mean" scores 0.80 and "is mean" 0.88 against them, i.e.
@@ -60,8 +82,6 @@ _STRIP_CHARS = ".,!?-—–'\"♪ "
 # main reason") got rewritten into the brand name - worse than the bug being fixed.
 #   * listed misspellings must match exactly (they are known, no guessing needed)
 #   * anything else must be very close to the canonical spelling itself
-# Measured over the real transcripts plus common English near-misses, that pair
-# recovers every listed variant with no false rewrites.
 #
 # Add terms as they come up: (canonical, [ways it has actually been misheard]).
 _DOMAIN_TERMS: list[tuple[str, list[str]]] = [
@@ -121,45 +141,66 @@ def _looks_like_hallucination(text: str) -> bool:
         return True
     # Nothing alphanumeric left (pure punctuation/symbols) is never a real transcript.
     return not any(ch.isalnum() for ch in stripped)
-_NUM_WORKERS = 3
+
+
+def _save_debug_clip(wav: np.ndarray, text: str, level: float) -> None:
+    """Write the utterance and its transcript so a bad result can actually be listened to."""
+    try:
+        import soundfile as sf
+
+        os.makedirs(_DEBUG_DIR, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S") + "-%03d" % (int(time.time() * 1000) % 1000)
+        sf.write(os.path.join(_DEBUG_DIR, stamp + ".wav"), wav, SAMPLE_RATE)
+        with open(os.path.join(_DEBUG_DIR, stamp + ".txt"), "w", encoding="utf-8") as fh:
+            fh.write("level=%.4f dur=%.2fs\n%s\n" % (level, len(wav) / SAMPLE_RATE, text))
+    except Exception as exc:  # debug aid must never break a live turn
+        print("[STT] debug capture failed: %s" % exc, flush=True)
 
 
 def _worker_init():
-    # Imported here (not module top-level) so CUDA is only touched inside a worker
-    # process - see tts.py's _worker_init for why.
-    import torch
-    from transformers import AutoProcessor, MoonshineForConditionalGeneration
+    # Imported inside the worker (not at module top level) for the same reason as
+    # tts.py: 'spawn' re-imports this module in every child, and model loading must
+    # happen once per worker rather than at import time.
+    from faster_whisper import WhisperModel
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    if device == "cpu":
-        # Same oversubscription issue as tts.py: torch defaults to using every visible
-        # core per process, so _NUM_WORKERS processes each doing that fight each other
-        # for the same cores. Pin to 1 thread per worker so worker count is the only lever.
-        torch.set_num_threads(1)
-    processor = AutoProcessor.from_pretrained(MODEL_ID)
-    model = MoonshineForConditionalGeneration.from_pretrained(MODEL_ID).to(device)
-    model.eval()
-    return {"processor": processor, "model": model, "device": device}
+    model = WhisperModel(
+        MODEL_ID,
+        device="cpu",
+        compute_type="int8",
+        cpu_threads=_CPU_THREADS,
+        num_workers=1,
+    )
+    return {"model": model}
 
 
 def _worker_batch(state, items):
-    """items: list of (wav_numpy_array,). Returns list of str, same order as items."""
-    import torch
+    """items: list of (wav_numpy_array,). Returns list of str, same order as items.
 
-    wavs = [item[0] for item in items]
-    inputs = state["processor"](
-        wavs, sampling_rate=SAMPLE_RATE, return_tensors="pt", padding=True
-    ).to(state["device"])
-    with torch.no_grad():
-        generated_ids = state["model"].generate(
-            **inputs,
-            max_new_tokens=_MAX_NEW_TOKENS,
-            num_beams=_NUM_BEAMS,
-            no_repeat_ngram_size=_NO_REPEAT_NGRAM,
-            repetition_penalty=_REPETITION_PENALTY,
+    CTranslate2 has no batched transcribe() for this API, so the pool's batching only
+    distributes work across worker processes; each item is decoded on its own here."""
+    texts = []
+    for (wav,) in items:
+        segments, info = state["model"].transcribe(
+            wav,
+            language="en",
+            beam_size=_BEAM_SIZE,
+            # Each utterance is an independent turn. Left on (the default), Whisper feeds
+            # its previous output back in as a prompt, which is the documented way to get
+            # it looping on repeated invented text across turns.
+            condition_on_previous_text=False,
+            no_speech_threshold=_NO_SPEECH_THRESHOLD,
+            log_prob_threshold=_LOGPROB_THRESHOLD,
+            compression_ratio_threshold=_COMPRESSION_RATIO_THRESHOLD,
+            # The caller already end-pointed this clip with Silero; re-running a VAD here
+            # would only trim it a second time.
+            vad_filter=False,
         )
-    texts = state["processor"].batch_decode(generated_ids, skip_special_tokens=True)
-    return [t.strip() for t in texts]
+        kept = [
+            seg.text for seg in segments
+            if getattr(seg, "no_speech_prob", 0.0) < _SEGMENT_NO_SPEECH_MAX
+        ]
+        texts.append(" ".join(t.strip() for t in kept).strip())
+    return texts
 
 
 # Guard against the 'spawn' child re-importing this module and recursively creating
@@ -173,20 +214,36 @@ def transcribe(audio: np.ndarray, sr: int) -> str:
     """Transcribe a raw audio clip (any sample rate) to text.
 
     Thread/process-safe: concurrent calls are automatically batched and distributed
-    across worker processes, each with its own CUDA context for real parallelism.
+    across worker processes.
     """
     wav = to_mono_tensor(audio, sr, SAMPLE_RATE)
     if wav.numel() == 0:
+        return ""
+
+    duration = wav.numel() / SAMPLE_RATE
+    # Mean absolute amplitude, not true RMS - that is the statistic _MIN_LEVEL and the
+    # VAD's floor are both calibrated against, so keep them measuring the same thing.
+    level = float(wav.abs().mean())
+    if level < _MIN_LEVEL or duration < _MIN_DURATION_SEC:
+        print(
+            "[STT] samples=%d dur=%.2fs level=%.4f rejected=input-gate"
+            % (wav.numel(), duration, level),
+            flush=True,
+        )
+        if _DEBUG_DIR:
+            _save_debug_clip(wav.numpy(), "<rejected: input-gate>", level)
         return ""
 
     fut = _pool.submit(wav.numpy())
     text = fut.result()
     filtered = _looks_like_hallucination(text)
     print(
-        "[STT] samples=%d dur=%.2fs rms=%.4f raw=%r filtered=%s"
-        % (wav.numel(), wav.numel() / SAMPLE_RATE, float(wav.abs().mean()), text[:120], filtered),
+        "[STT] samples=%d dur=%.2fs level=%.4f raw=%r filtered=%s"
+        % (wav.numel(), duration, level, text[:120], filtered),
         flush=True,
     )
+    if _DEBUG_DIR:
+        _save_debug_clip(wav.numpy(), text, level)
     if filtered:
         return ""
     return _apply_domain_vocab(text)

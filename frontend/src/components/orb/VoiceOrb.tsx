@@ -1,4 +1,11 @@
-import { AnimatePresence, motion } from "framer-motion";
+import {
+  AnimatePresence,
+  motion,
+  useMotionValue,
+  useSpring,
+  useTransform,
+  type MotionValue,
+} from "framer-motion";
 import { Mic } from "lucide-react";
 import type { AssistantStatus } from "../../types";
 import { cn } from "../../lib/utils";
@@ -27,20 +34,52 @@ const EQ_BARS = [
   { h: [9, 20, 13], d: 0.85 },
 ];
 
-function EqualizerBars() {
+// Each bar tracks the real signal, scaled by its own factor so they don't move as one
+// solid block. Falls back to the canned loop when there's no amplitude source (no Web
+// Audio, or playback that never started), so the orb still reads as "busy".
+function EqualizerBars({ level, live }: { level: MotionValue<number>; live: boolean }) {
   return (
-    <div className="flex items-center gap-[3px]">
+    <div className="flex h-8 items-center gap-[3px]">
       {EQ_BARS.map((bar, i) => (
-        <motion.span
-          key={i}
-          className="w-1 rounded-full bg-white"
-          initial={{ height: bar.h[0] }}
-          animate={{ height: bar.h }}
-          transition={{ duration: bar.d, repeat: Infinity, repeatType: "mirror", ease: "easeInOut", delay: i * 0.06 }}
-        />
+        <EqualizerBar key={i} level={level} live={live} bar={bar} index={i} />
       ))}
     </div>
   );
+}
+
+function EqualizerBar({
+  level,
+  live,
+  bar,
+  index,
+}: {
+  level: MotionValue<number>;
+  live: boolean;
+  bar: { h: number[]; d: number };
+  index: number;
+}) {
+  const peak = bar.h[1];
+  const scale = 0.75 + ((index * 37) % 50) / 100; // stable per-bar variation, no randomness per render
+  const height = useTransform(level, [0, 0.35], [6, peak * scale * 1.4], { clamp: true });
+  const smooth = useSpring(height, { stiffness: 320, damping: 26, mass: 0.4 });
+
+  if (!live) {
+    return (
+      <motion.span
+        className="w-1 rounded-full bg-white"
+        initial={{ height: bar.h[0] }}
+        animate={{ height: bar.h }}
+        transition={{
+          duration: bar.d,
+          repeat: Infinity,
+          repeatType: "mirror",
+          ease: "easeInOut",
+          delay: index * 0.06,
+        }}
+      />
+    );
+  }
+  return <motion.span className="w-1 rounded-full bg-white" style={{ height: smooth }} />;
 }
 
 function ThinkingSpinner() {
@@ -53,8 +92,25 @@ function ThinkingSpinner() {
   );
 }
 
-export function VoiceOrb({ status }: { status: AssistantStatus }) {
+export function VoiceOrb({
+  status,
+  level,
+}: {
+  status: AssistantStatus;
+  // Live amplitude 0..~1: the user's mic while listening, the reply's own audio while
+  // speaking. Optional so the orb still renders standalone (previews, tests) - it just
+  // falls back to the ambient animation when nothing is feeding it.
+  level?: MotionValue<number>;
+}) {
   const active = status === "listening" || status === "speaking";
+
+  const fallback = useMotionValue(0);
+  const source = level ?? fallback;
+  const live = level !== undefined && active;
+  // Speech RMS rarely exceeds ~0.3, so map that to the top of the range rather than 1.0
+  // or the orb would barely move.
+  const reactive = useTransform(source, [0.01, 0.3], [1, 1.13], { clamp: true });
+  const scale = useSpring(reactive, { stiffness: 240, damping: 22, mass: 0.5 });
 
   return (
     <div className="relative flex size-60 items-center justify-center sm:size-72 lg:size-80">
@@ -99,14 +155,17 @@ export function VoiceOrb({ status }: { status: AssistantStatus }) {
             "radial-gradient(circle at 35% 30%, #a5f3fc 0%, #22d3ee 35%, #6366f1 78%, #4338ca 100%)",
           boxShadow:
             "inset -10px -14px 30px rgba(15,10,40,0.45), inset 8px 10px 22px rgba(255,255,255,0.25), 0 25px 60px -15px rgba(56,189,248,0.45)",
+          // Driven by the actual signal when there is one; the timed loop below is only
+          // the resting/ambient state.
+          ...(live ? { scale } : null),
         }}
-        animate={{ scale: active ? [1, 1.035, 1] : [1, 1.015, 1] }}
-        transition={{ duration: active ? 1.5 : 4.5, repeat: Infinity, ease: "easeInOut" }}
+        animate={live ? undefined : { scale: [1, 1.015, 1] }}
+        transition={live ? undefined : { duration: 4.5, repeat: Infinity, ease: "easeInOut" }}
       >
         <AnimatePresence mode="wait">
           {status === "speaking" ? (
             <motion.div key="speaking" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-              <EqualizerBars />
+              <EqualizerBars level={source} live={live} />
             </motion.div>
           ) : status === "thinking" ? (
             <motion.div key="thinking" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>

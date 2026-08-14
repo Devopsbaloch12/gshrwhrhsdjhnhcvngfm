@@ -17,6 +17,21 @@ export type EmotionPreset =
 
 export type AssistantStatus = "idle" | "listening" | "thinking" | "speaking" | "error";
 
+// GET /api/config - the backend's own capability list, which the UI renders instead of
+// a hardcoded copy. `label`/`description` stay client-side: they're cosmetic names for
+// the style ids and the backend has no opinion about them.
+export interface ServerConfig {
+  voices: { id: string; gender: VoiceGender }[];
+  emotions: { id: string; speed: number }[];
+  default_voice: string;
+  default_emotion: string;
+  status: string;
+}
+
+// Whether the dashboard has actually reached the backend, as opposed to merely having
+// an API key saved locally.
+export type ConnectionState = "checking" | "online" | "offline";
+
 export interface ConversationEntry {
   id: string;
   query: string;

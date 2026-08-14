@@ -28,3 +28,4 @@ backend.log
 scratchpad_*
 tunnel.log
 *.bak.*
+stt_debug/

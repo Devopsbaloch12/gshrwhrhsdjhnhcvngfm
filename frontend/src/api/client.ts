@@ -1,4 +1,4 @@
-import type { ConverseResponse, ConverseAudioResponse } from "../types";
+import type { ConverseResponse, ConverseAudioResponse, ServerConfig } from "../types";
 
 export class ApiError extends Error {
   status: number;
@@ -37,6 +37,20 @@ async function postJson<T>(baseUrl: string, path: string, body: unknown): Promis
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
+}
+
+// What the backend says it supports. Fetched at startup instead of mirrored by hand in
+// the frontend, so adding or removing a voice/tone server-side shows up here on reload.
+// Doubles as the reachability probe behind the connection badge.
+export async function fetchConfig(baseUrl: string, signal?: AbortSignal): Promise<ServerConfig> {
+  let res: Response;
+  try {
+    res = await fetch(`${baseUrl}/api/config`, { signal });
+  } catch {
+    throw new ApiError("Can't reach the voice agent backend. Is it running?", 0);
+  }
+  if (!res.ok) throw new ApiError(res.statusText || "Config request failed", res.status);
+  return res.json() as Promise<ServerConfig>;
 }
 
 export function converse(

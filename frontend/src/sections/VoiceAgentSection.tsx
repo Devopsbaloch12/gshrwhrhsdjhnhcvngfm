@@ -15,7 +15,8 @@ import { useAudioPlayer } from "../hooks/useAudioPlayer";
 import { converse, converseAudio, decodeWavBase64ToUrl, ApiError, type ChatMessage } from "../api/client";
 import { computeHistoryStats } from "../lib/categorize";
 import { formatRelativeTime, truncate } from "../lib/utils";
-import { voiceById } from "../lib/voices";
+import { resolveVoices, voiceById } from "../lib/voices";
+import { useServerStore } from "../store/serverStore";
 import type { SectionId } from "../components/layout/navItems";
 
 export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) => void }) {
@@ -32,7 +33,16 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
   const emotion = useSettingsStore((s) => s.emotion);
   const apiKeys = useSettingsStore((s) => s.apiKeys);
 
+  const serverConfig = useServerStore((s) => s.config);
+  const connection = useServerStore((s) => s.connection);
+  const serverVoices = useMemo(() => resolveVoices(serverConfig), [serverConfig]);
+
   const [typedQuery, setTypedQuery] = useState("");
+  // The backend answered, and what it heard was nothing usable. Distinct from an error:
+  // the call is fine and still listening, the last clip just held no speech. Surfaced in
+  // the caption so a rejected utterance reads as "say that again" rather than looking
+  // like the app ignored the user.
+  const [heardNothing, setHeardNothing] = useState(false);
   const stats = useMemo(() => computeHistoryStats(history, 6), [history]);
   const lastEntry = history[0];
 
@@ -83,7 +93,7 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
       setStatus("idle");
     }
   };
-  const { play, stop } = useAudioPlayer(onReplayEnded);
+  const { play, stop, level: playbackLevel } = useAudioPlayer(onReplayEnded);
 
   // The user started talking over the assistant: cut the reply off and go straight
   // back to listening, so they can just keep speaking. Not useCallback-memoized -
@@ -145,6 +155,7 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
         play(decodeWavBase64ToUrl(res.audio_base64));
       } catch (err) {
         setError(err instanceof ApiError ? err.message : "Something went wrong reaching the assistant.");
+        setStatus("idle"); // otherwise a failed typed query leaves the orb spinning on "thinking"
       }
     },
     [apiBaseUrl, voice, emotion, apiKeys, setStatus, setError, commitTurn, play]
@@ -162,6 +173,7 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
       return;
     }
     setStatus("thinking");
+    setHeardNothing(false);
     const turnId = ++turnIdRef.current;
     try {
       const res = await converseAudio(apiBaseUrl, {
@@ -172,11 +184,17 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
         history: chatHistoryRef.current,
       });
       // Hung up, or talked over this turn, while it was in flight - drop the reply
-      // instead of talking at someone who already moved on.
-      if (!inCallRef.current || turnId !== turnIdRef.current) return;
+      // instead of talking at someone who already moved on. Dropping it must still
+      // settle the status: "thinking" belongs to this turn, and nothing else will
+      // clear it once the turn is abandoned.
+      if (!inCallRef.current || turnId !== turnIdRef.current) {
+        if (!inCallRef.current) setStatus("idle");
+        return;
+      }
       if (!res.user_text) {
         // nothing intelligible in that utterance - let the user know instead of
         // silently going back to listening as if nothing happened
+        setHeardNothing(true);
         playErrorBeep();
         if (voiceCall.inCall) {
           setStatus("listening");
@@ -189,7 +207,10 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
       setStatus("speaking");
       play(decodeWavBase64ToUrl(res.audio_base64));
     } catch (err) {
-      if (!inCallRef.current || turnId !== turnIdRef.current) return;
+      if (!inCallRef.current || turnId !== turnIdRef.current) {
+        if (!inCallRef.current) setStatus("idle");
+        return;
+      }
       setError(err instanceof ApiError ? err.message : "Something went wrong reaching the assistant.");
       playErrorBeep();
       if (voiceCall.inCall) {
@@ -208,6 +229,7 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
       stop(); // ending the call must also silence a reply that's mid-playback
       voiceCall.endCall();
       setError(null);
+      setHeardNothing(false);
       setStatus("idle");
       return;
     }
@@ -217,6 +239,7 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
     }
     inCallRef.current = true;
     setError(null);
+    setHeardNothing(false);
     setStatus("listening");
     voiceCall.startCall();
   }
@@ -273,7 +296,7 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
                     <p className="text-sm font-medium text-ink-100">{truncate(entry.query, 140)}</p>
                     <p className="text-sm text-ink-400">{truncate(entry.reply, 200)}</p>
                     <span className="text-[11px] text-ink-600">
-                      Voice: {voiceById(entry.voice).label} ({entry.voice})
+                      Voice: {voiceById(entry.voice, serverVoices).label} ({entry.voice})
                     </span>
                   </GlassCard>
                 ))}
@@ -300,12 +323,18 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
             </GlassCard>
           )}
 
-          <VoiceOrb status={status} />
+          {/* The orb follows whichever side actually holds the floor: the mic while the
+              user talks, the reply's own audio while the assistant does. */}
+          <VoiceOrb
+            status={status}
+            level={status === "speaking" ? playbackLevel : voiceCall.micLevel}
+          />
 
           <TranscriptCaption
             status={status}
             lastQuery={lastEntry?.query ?? ""}
             lastReply={lastEntry?.reply ?? ""}
+            heardNothing={heardNothing}
           />
 
           {(errorMessage || voiceCall.permissionError) && (
@@ -322,8 +351,16 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
             inCall={voiceCall.inCall}
             active={voiceCall.inCall}
             onToggle={handleMicToggle}
-            disabled={apiKeys.length === 0 && !voiceCall.inCall}
+            // Starting a call against a backend we know is unreachable can only end in a
+            // failed turn - but never block *ending* one that's already running.
+            disabled={!voiceCall.inCall && (apiKeys.length === 0 || connection === "offline")}
           />
+
+          {connection === "offline" && !voiceCall.inCall && (
+            <p className="max-w-xs text-center text-xs text-rose-300/90">
+              Can’t reach the backend. Check the URL under Voice settings.
+            </p>
+          )}
 
           {(!voiceCall.supported || voiceCall.permissionError) && (
             <div className="flex w-full max-w-sm flex-col items-center gap-2">
