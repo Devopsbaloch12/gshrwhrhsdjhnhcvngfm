@@ -35,7 +35,7 @@ export function VoiceSection() {
               className={cn(
                 "rounded-full border px-3.5 py-1.5 text-sm font-medium transition-colors",
                 emotion === option
-                  ? "border-transparent bg-gradient-to-r from-cyan-400 to-indigo-500 text-white"
+                  ? "border-lime-300 bg-lime-300 text-base-950"
                   : "border-white/10 bg-white/[0.02] text-ink-300 hover:border-white/20 hover:text-ink-50"
               )}
             >
@@ -55,7 +55,7 @@ export function VoiceSection() {
           value={apiBaseUrl}
           onChange={(e) => setApiBaseUrl(e.target.value.trim())}
           placeholder="http://127.0.0.1:7860"
-          className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 font-mono text-sm text-ink-50 placeholder:text-ink-600 outline-none focus:border-cyan-400/50"
+          className="rounded-lg border border-white/10 bg-black/20 px-3 py-2.5 font-mono text-sm text-ink-50 placeholder:text-ink-600 outline-none"
         />
       </GlassCard>
     </div>

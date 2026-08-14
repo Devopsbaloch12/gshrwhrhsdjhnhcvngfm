@@ -1,0 +1,20 @@
+[Unit]
+Description=Nodex voice agent API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/azureuser/gshrwhrhsdjhnhcvngfm/Supertonic-100m
+EnvironmentFile=/home/azureuser/gshrwhrhsdjhnhcvngfm/Supertonic-100m/.env
+ExecStart=/home/azureuser/gshrwhrhsdjhnhcvngfm/Supertonic-100m/.venv/bin/python app.py
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=20
+StandardOutput=append:/home/azureuser/gshrwhrhsdjhnhcvngfm/backend.log
+StandardError=append:/home/azureuser/gshrwhrhsdjhnhcvngfm/backend.log
+
+[Install]
+WantedBy=multi-user.target

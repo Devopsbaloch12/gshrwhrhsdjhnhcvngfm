@@ -1,6 +1,7 @@
 """Groq chat client for generating conversational replies."""
 
 import os
+import time
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -37,5 +38,10 @@ def reply(history: list[dict], emotion: str = DEFAULT_EMOTION) -> str:
     tone = EMOTION_PRESETS.get(emotion, EMOTION_PRESETS[DEFAULT_EMOTION])["tone"]
     system_prompt = f"{SYSTEM_PROMPT} {tone}"
     messages = [{"role": "system", "content": system_prompt}] + history
+    started = time.perf_counter()
+    print(f"[LLM] model={_MODEL} context_messages={len(history)}", flush=True)
     completion = client.chat.completions.create(model=_MODEL, messages=messages)
-    return completion.choices[0].message.content.strip()
+    text = completion.choices[0].message.content.strip()
+    elapsed = time.perf_counter() - started
+    print(f"[LLM] model={_MODEL} latency={elapsed:.2f}s reply_chars={len(text)}", flush=True)
+    return text

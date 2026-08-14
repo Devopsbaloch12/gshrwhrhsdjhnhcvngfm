@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useRef, useState, type FormEvent } from "react";
 import { motion } from "framer-motion";
-import { KeyRound, Send, MicOff, Trash2, MessageCircle } from "lucide-react";
+import { Activity, KeyRound, Send, MicOff, Trash2, MessageCircle, Server } from "lucide-react";
 import { VoiceOrb } from "../components/orb/VoiceOrb";
 import { TranscriptCaption } from "../components/orb/TranscriptCaption";
 import { MicButton } from "../components/orb/MicButton";
@@ -46,28 +46,19 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
   const stats = useMemo(() => computeHistoryStats(history, 6), [history]);
   const lastEntry = history[0];
 
-  // The assistant had no memory between turns: each request sent only the current
-  // utterance, so "what about tomorrow?" arrived with nothing to refer back to. The
-  // store already holds the transcript - flatten the recent turns into role/content
-  // pairs and send them along. `history` is newest-first, so reverse for chronological
-  // order, and cap it so the prompt (and per-turn latency) stays bounded.
-  const HISTORY_TURNS = 6;
-  const chatHistory = useMemo<ChatMessage[]>(
-    () =>
-      history
-        .slice(0, HISTORY_TURNS)
-        .reverse()
-        .flatMap((entry) => [
-          { role: "user" as const, content: entry.query },
-          { role: "assistant" as const, content: entry.reply },
-        ]),
-    [history]
-  );
-  // Read at call time from a ref: submitUtterance is invoked from the VAD hook's own
-  // callback, which would otherwise close over whatever chatHistory was when the call
-  // started and replay a stale (or empty) transcript on every later turn.
-  const chatHistoryRef = useRef<ChatMessage[]>(chatHistory);
-  chatHistoryRef.current = chatHistory;
+  // Dashboard history spans many calls and is persisted for reporting. Live LLM
+  // context must not: replaying that global list made a brand-new "can you hear me?"
+  // call inherit unrelated date questions from previous sessions. Keep a dedicated,
+  // chronological context for only the current call and reset it on every new call.
+  const MAX_SESSION_MESSAGES = 40;
+  const sessionHistoryRef = useRef<ChatMessage[]>([]);
+  const rememberTurn = useCallback((query: string, reply: string) => {
+    sessionHistoryRef.current = [
+      ...sessionHistoryRef.current,
+      { role: "user" as const, content: query },
+      { role: "assistant" as const, content: reply },
+    ].slice(-MAX_SESSION_MESSAGES);
+  }, []);
 
   // Bumped whenever the current turn stops being the one we care about (barge-in, or
   // hanging up). A reply that resolves against a stale id is discarded instead of
@@ -148,8 +139,9 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
           voice,
           emotion,
           apiKey: apiKeys[0].key,
-          history: chatHistoryRef.current,
+          history: sessionHistoryRef.current,
         });
+        rememberTurn(trimmed, res.reply_text);
         commitTurn(trimmed, res.reply_text, voice);
         setStatus("speaking");
         play(decodeWavBase64ToUrl(res.audio_base64));
@@ -158,7 +150,7 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
         setStatus("idle"); // otherwise a failed typed query leaves the orb spinning on "thinking"
       }
     },
-    [apiBaseUrl, voice, emotion, apiKeys, setStatus, setError, commitTurn, play]
+    [apiBaseUrl, voice, emotion, apiKeys, setStatus, setError, commitTurn, play, rememberTurn]
   );
 
   // Also deliberately not useCallback-memoized, for the same reason as onReplayEnded
@@ -181,7 +173,7 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
         voice,
         emotion,
         apiKey: apiKeys[0].key,
-        history: chatHistoryRef.current,
+        history: sessionHistoryRef.current,
       });
       // Hung up, or talked over this turn, while it was in flight - drop the reply
       // instead of talking at someone who already moved on. Dropping it must still
@@ -203,6 +195,7 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
         return;
       }
       setError(null); // clear any stale "didn't catch that" from an earlier turn
+      rememberTurn(res.user_text, res.reply_text);
       commitTurn(res.user_text, res.reply_text, voice);
       setStatus("speaking");
       play(decodeWavBase64ToUrl(res.audio_base64));
@@ -238,6 +231,7 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
       return;
     }
     inCallRef.current = true;
+    sessionHistoryRef.current = [];
     setError(null);
     setHeardNothing(false);
     setStatus("listening");
@@ -251,14 +245,34 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
   }
 
   return (
-    <div className="flex flex-col gap-8">
+    <div className="flex flex-col gap-6">
       <SectionHeader
-        title="Voice Agent"
-        subtitle="Talk to the assistant live, or type if your browser can't do speech input."
+        title="Agent workspace"
+        subtitle="Operate, monitor, and test your production voice pipeline."
       />
 
-      <div className="grid grid-cols-1 gap-8 lg:grid-cols-[1.05fr_0.95fr] lg:items-start">
-        <div className="order-2 flex flex-col gap-8 lg:order-1">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        {[
+          { label: "Service status", value: connection === "online" ? "Operational" : connection === "checking" ? "Checking" : "Offline", icon: Server },
+          { label: "Conversations", value: history.length.toLocaleString(), icon: MessageCircle },
+          { label: "Active credentials", value: apiKeys.length.toString(), icon: KeyRound },
+          { label: "Pipeline", value: "Local STT + TTS", icon: Activity },
+        ].map((metric) => (
+          <div key={metric.label} className="rounded-xl border border-white/[0.08] bg-base-850/95 p-4 shadow-[0_16px_40px_rgba(0,0,0,.16)]">
+            <div className="flex items-center justify-between text-ink-500">
+              <span className="text-[10px] font-semibold uppercase tracking-[0.13em]">{metric.label}</span>
+              <metric.icon className="size-4" />
+            </div>
+            <div className="mt-3 flex items-center gap-2">
+              {metric.label === "Service status" && connection === "online" && <span className="size-2 rounded-full bg-lime-300" />}
+              <span className="text-xl font-semibold tracking-[-0.03em] text-ink-50">{metric.value}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_420px] xl:items-start">
+        <div className="order-2 flex flex-col gap-5 xl:order-2">
           <HistoryPanel stats={stats} title="Top topics" />
 
           <div className="flex flex-col gap-3">
@@ -276,7 +290,7 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
             </div>
             {history.length === 0 ? (
               <GlassCard className="flex flex-col items-center gap-3 px-6 py-10 text-center">
-                <div className="flex size-11 items-center justify-center rounded-full bg-gradient-to-br from-cyan-400/20 to-indigo-500/20 text-cyan-300">
+                <div className="flex size-11 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.03] text-ink-400">
                   <MessageCircle className="size-5" />
                 </div>
                 <p className="max-w-xs text-sm text-ink-400">
@@ -305,7 +319,7 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
           </div>
         </div>
 
-        <div className="order-1 flex flex-col items-center gap-6 lg:order-2 lg:sticky lg:top-10">
+        <div className="order-1 flex min-h-[640px] flex-col items-center justify-center gap-5 rounded-xl border border-white/[0.08] bg-base-850/95 px-6 py-8 shadow-[0_18px_50px_rgba(0,0,0,.2)] xl:sticky xl:top-7">
           {apiKeys.length === 0 && (
             <GlassCard className="flex w-full max-w-sm items-center gap-3 border-amber-400/20 bg-amber-400/[0.05] p-3.5">
               <KeyRound className="size-4 shrink-0 text-amber-300" />
@@ -379,7 +393,7 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
                 />
                 <button
                   type="submit"
-                  className="flex size-9 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-cyan-400 to-indigo-500 text-white"
+                  className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-lime-300 text-base-950"
                   aria-label="Send"
                 >
                   <Send className="size-4" />

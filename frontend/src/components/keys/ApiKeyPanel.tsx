@@ -86,7 +86,7 @@ export function ApiKeyPanel() {
               synthesized audio.
             </p>
           </div>
-          <div className="flex size-9 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-cyan-400/20 to-indigo-500/20 text-cyan-300">
+          <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-lime-300/20 bg-lime-300/[0.07] text-lime-300">
             <KeyRound className="size-4" />
           </div>
         </div>
@@ -97,13 +97,13 @@ export function ApiKeyPanel() {
             onChange={(e) => setLabel(e.target.value)}
             placeholder="Key label (e.g. Dashboard)"
             maxLength={64}
-            className="flex-1 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-sm text-ink-50 placeholder:text-ink-500 outline-none focus:border-cyan-400/50"
+            className="flex-1 rounded-lg border border-white/10 bg-black/20 px-3 py-2.5 text-sm text-ink-50 placeholder:text-ink-500 outline-none"
           />
           <button
             type="button"
             onClick={handleGenerate}
             disabled={generating}
-            className="flex items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-cyan-400 to-indigo-500 px-4 py-2 text-sm font-semibold text-white shadow-[0_8px_20px_-8px_rgba(56,189,248,0.6)] transition-opacity disabled:opacity-60"
+            className="flex items-center justify-center gap-2 rounded-lg bg-lime-300 px-4 py-2.5 text-sm font-semibold text-base-950 transition-colors hover:bg-lime-200 disabled:opacity-60"
           >
             {generating && <Loader2 className="size-4 animate-spin" />}
             Generate new key

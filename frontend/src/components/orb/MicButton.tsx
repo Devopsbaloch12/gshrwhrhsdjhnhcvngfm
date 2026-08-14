@@ -17,12 +17,12 @@ export function MicButton({ inCall, active, disabled, onToggle }: MicButtonProps
       disabled={disabled}
       whileTap={{ scale: 0.94 }}
       className={cn(
-        "relative flex size-16 items-center justify-center rounded-full text-white transition-shadow duration-200",
+        "relative flex size-14 items-center justify-center rounded-xl transition-all duration-200",
         inCall
-          ? "bg-gradient-to-br from-rose-500 to-rose-600 shadow-[0_10px_30px_-8px_rgba(244,63,94,0.55)]"
-          : "bg-gradient-to-br from-cyan-400 to-indigo-500 shadow-[0_10px_30px_-8px_rgba(56,189,248,0.55)]",
+          ? "bg-rose-500 text-white shadow-[0_10px_28px_-12px_rgba(244,63,94,.7)]"
+          : "bg-lime-300 text-base-950 shadow-[0_10px_28px_-12px_rgba(190,242,100,.65)] hover:bg-lime-200",
         "disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none",
-        active && "shadow-[0_0_0_8px_rgba(34,211,238,0.12),0_10px_30px_-8px_rgba(56,189,248,0.6)]"
+        active && "ring-4 ring-lime-300/10"
       )}
       aria-pressed={inCall}
       aria-label={inCall ? "End call" : "Start call"}

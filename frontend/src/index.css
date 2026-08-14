@@ -1,23 +1,23 @@
 @import "tailwindcss";
 
 @theme {
-  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
-  --font-display: "Space Grotesk", "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Inter", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Inter", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
 
-  --color-base-950: #05060b;
-  --color-base-900: #0a0d18;
-  --color-base-850: #0d1120;
-  --color-base-800: #121729;
-  --color-base-700: #1a2035;
-  --color-base-600: #262e48;
+  --color-base-950: #090b0d;
+  --color-base-900: #0f1215;
+  --color-base-850: #14181c;
+  --color-base-800: #191e23;
+  --color-base-700: #252b31;
+  --color-base-600: #363e46;
 
-  --color-ink-50: #f4f5fb;
-  --color-ink-100: #e4e5f2;
-  --color-ink-200: #c9cce0;
-  --color-ink-300: #aaadc9;
-  --color-ink-400: #9195b3;
-  --color-ink-500: #6e7290;
-  --color-ink-600: #545876;
+  --color-ink-50: #f7f8f8;
+  --color-ink-100: #e8eaeb;
+  --color-ink-200: #cfd3d6;
+  --color-ink-300: #adb4ba;
+  --color-ink-400: #8b949c;
+  --color-ink-500: #69737c;
+  --color-ink-600: #4d565e;
 
   --animate-orb-spin-slow: orb-spin 22s linear infinite;
   --animate-orb-spin-slower: orb-spin 40s linear infinite reverse;
@@ -52,12 +52,25 @@ html, body {
 }
 
 body {
-  background: var(--color-base-950);
+  background: #0b0d0f;
   color: var(--color-ink-50);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   overflow-x: hidden;
+}
+
+button, input, textarea, select { font: inherit; }
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+  outline: 2px solid #a3e635;
+  outline-offset: 2px;
+}
+
+.app-grid {
+  background-image:
+    linear-gradient(rgba(255,255,255,.018) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,.018) 1px, transparent 1px);
+  background-size: 32px 32px;
 }
 
 #root {

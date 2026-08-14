@@ -246,7 +246,7 @@ export function useVoiceCall({ onUtterance, onInterrupt }: UseVoiceCallOptions) 
       );
       setInCall(false);
     }
-  }, [supported, inCall, startSegmentRecorder, pauseForReply, micLevel]);
+  }, [supported, inCall, startSegmentRecorder, stopSegmentRecorder, pauseForReply, micLevel]);
 
   const endCall = useCallback(() => {
     endedRef.current = true;

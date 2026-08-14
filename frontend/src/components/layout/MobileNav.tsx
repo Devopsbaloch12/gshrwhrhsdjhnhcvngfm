@@ -28,14 +28,14 @@ export function MobileNav({
               aria-label={item.label}
               aria-current={isActive ? "page" : undefined}
               className={cn(
-                "relative flex flex-1 items-center justify-center gap-1.5 rounded-full py-2 text-sm font-medium transition-colors",
-                isActive ? "text-white" : "text-ink-400"
+                "relative flex flex-1 items-center justify-center gap-1.5 rounded-md py-2 text-sm font-medium transition-colors",
+                isActive ? "text-base-950" : "text-ink-400"
               )}
             >
               {isActive && (
                 <motion.span
                   layoutId="mobile-nav-active"
-                  className="absolute inset-0 rounded-full bg-gradient-to-r from-cyan-400 to-indigo-500"
+                  className="absolute inset-0 rounded-md bg-lime-300"
                   transition={{ type: "spring", stiffness: 400, damping: 32 }}
                 />
               )}
