@@ -24,13 +24,11 @@ DEFAULT_SPEED = 1.05
 _MAX_BATCH = 1
 _BATCH_WINDOW_SEC = 0.0
 _MAX_WAIT_SEC = 0.8  # caps how long a batch waits for laggards (e.g. slow upstream LLM calls)
-_NUM_WORKERS = 4
-# Supertonic's own default is 8; a 20-concurrent stress-test target earlier dropped
-# this to 4, which measurably hurt clarity. But most of that "unclear" complaint was
-# actually the VAD chopping sentences into garbled fragments (fixed separately in
-# useVoiceCall.ts's MIN_SPEECH_MS), not the step count alone - and 8 costs real
-# latency on every single turn. Split the difference until this is verified by ear.
-_TOTAL_STEPS = 8
+_NUM_WORKERS = 2
+# Four-call production profile: spend more compute on each voice instead of optimizing
+# for the old eight-call target. Ten denoising steps improves fidelity over the default
+# eight while two 2-thread workers keep all four vCPUs useful under overlap.
+_TOTAL_STEPS = 10
 
 
 def _worker_init():
@@ -49,7 +47,7 @@ def _worker_init():
     # each worker grab all 4 cores when calls overlap. Four single-thread workers map
     # directly to the box's four vCPUs and allow four independent callers to progress.
     return {
-        "tts": TTS(auto_download=True, intra_op_num_threads=1, inter_op_num_threads=1),
+        "tts": TTS(auto_download=True, intra_op_num_threads=2, inter_op_num_threads=1),
         "voice_cache": {},
     }
 
