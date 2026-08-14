@@ -215,7 +215,7 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
 
   const voiceCall = useVoiceCall({ onUtterance: submitUtterance, onInterrupt: handleInterrupt });
 
-  function handleMicToggle() {
+  async function handleMicToggle() {
     if (voiceCall.inCall) {
       inCallRef.current = false;
       turnIdRef.current += 1; // invalidate any in-flight reply
@@ -230,12 +230,13 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
       setError("Generate an API key first to talk to your assistant.");
       return;
     }
-    inCallRef.current = true;
     sessionHistoryRef.current = [];
     setError(null);
     setHeardNothing(false);
     setStatus("listening");
-    voiceCall.startCall();
+    const started = await voiceCall.startCall();
+    inCallRef.current = started;
+    if (!started) setStatus("idle");
   }
 
   function handleTypedSubmit(e: FormEvent) {
@@ -349,6 +350,8 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
             lastQuery={lastEntry?.query ?? ""}
             lastReply={lastEntry?.reply ?? ""}
             heardNothing={heardNothing}
+            calibrating={voiceCall.calibrating}
+            starting={voiceCall.starting}
           />
 
           {(errorMessage || voiceCall.permissionError) && (
@@ -367,7 +370,7 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
             onToggle={handleMicToggle}
             // Starting a call against a backend we know is unreachable can only end in a
             // failed turn - but never block *ending* one that's already running.
-            disabled={!voiceCall.inCall && (apiKeys.length === 0 || connection === "offline")}
+            disabled={voiceCall.starting || (!voiceCall.inCall && (apiKeys.length === 0 || connection !== "online"))}
           />
 
           {voiceCall.inCall && voiceCall.wakeLockStatus === "active" && (

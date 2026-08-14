@@ -18,6 +18,9 @@ const SILENCE_MS = 1400;
 const MAX_UTTERANCE_MS = 20000; // safety cutoff if someone just keeps talking
 const CHECK_INTERVAL_MS = 50;
 const SPEECH_RMS_THRESHOLD = 0.02;
+const NOISE_CALIBRATION_MS = 650;
+const NOISE_THRESHOLD_MULTIPLIER = 1.8;
+const NOISE_THRESHOLD_MARGIN = 0.006;
 const SPEECH_CONFIRM_CHECKS = 2; // filters brief pops/clicks from counting as speech starting
 // Utterances shorter than this are noise/false-starts, not real speech - discard them
 // client-side instead of round-tripping a doomed empty-transcript request. Cutting
@@ -65,7 +68,9 @@ export function useVoiceCall({ onUtterance, onInterrupt }: UseVoiceCallOptions) 
     typeof AudioContext !== "undefined";
 
   const [inCall, setInCall] = useState(false);
+  const [starting, setStarting] = useState(false);
   const [permissionError, setPermissionError] = useState<string | null>(null);
+  const [calibrating, setCalibrating] = useState(false);
   const [wakeLockStatus, setWakeLockStatus] = useState<
     "unsupported" | "idle" | "active" | "unavailable"
   >(() => (typeof navigator !== "undefined" && "wakeLock" in navigator ? "idle" : "unsupported"));
@@ -83,6 +88,10 @@ export function useVoiceCall({ onUtterance, onInterrupt }: UseVoiceCallOptions) 
   const chunksRef = useRef<BlobPart[]>([]);
   const intervalRef = useRef<number | null>(null);
   const utteranceStartRef = useRef<number>(0);
+  const calibrationUntilRef = useRef(0);
+  const calibrationTotalRef = useRef(0);
+  const calibrationChecksRef = useRef(0);
+  const noiseFloorRef = useRef(0.008);
   const speechStartAtRef = useRef<number | null>(null);
   const lastLoudAtRef = useRef<number | null>(null);
   const loudStreakRef = useRef(0);
@@ -176,7 +185,8 @@ export function useVoiceCall({ onUtterance, onInterrupt }: UseVoiceCallOptions) 
   }, [stopSegmentRecorder]);
 
   const startCall = useCallback(async () => {
-    if (!supported || inCall) return;
+    if (!supported || inCall || starting) return false;
+    setStarting(true);
     setPermissionError(null);
     try {
       // Bare `{ audio: true }` leaves the browser's own DSP off, so room noise, fan
@@ -210,6 +220,10 @@ export function useVoiceCall({ onUtterance, onInterrupt }: UseVoiceCallOptions) 
 
       busyRef.current = false;
       endedRef.current = false;
+      calibrationTotalRef.current = 0;
+      calibrationChecksRef.current = 0;
+      calibrationUntilRef.current = performance.now() + NOISE_CALIBRATION_MS;
+      setCalibrating(true);
       startSegmentRecorder();
       inCallRef.current = true;
       setInCall(true);
@@ -226,6 +240,26 @@ export function useVoiceCall({ onUtterance, onInterrupt }: UseVoiceCallOptions) 
         const rms = Math.sqrt(sumSquares / buf.length);
         micLevel.set(rms);
         const now = performance.now();
+
+        // Measure this phone/room before accepting speech. A fixed threshold made
+        // automatic gain control and steady background noise look like someone was
+        // still talking, so the browser held recordings for 10-20 seconds before it
+        // ever contacted the backend.
+        if (now < calibrationUntilRef.current) {
+          calibrationTotalRef.current += rms;
+          calibrationChecksRef.current += 1;
+          return;
+        }
+        if (calibrationChecksRef.current > 0) {
+          noiseFloorRef.current = calibrationTotalRef.current / calibrationChecksRef.current;
+          calibrationChecksRef.current = 0;
+          setCalibrating(false);
+          // Recording began before calibration so the microphone was ready, but those
+          // samples are room noise rather than an utterance. Rotate them away.
+          discardRef.current = true;
+          stopSegmentRecorder();
+          return;
+        }
 
         if (busyRef.current) {
           // No segment recorder runs while the assistant holds the floor, but the
@@ -244,7 +278,18 @@ export function useVoiceCall({ onUtterance, onInterrupt }: UseVoiceCallOptions) 
           return;
         }
         if (!recorderRef.current) return;
-        const loud = rms > SPEECH_RMS_THRESHOLD;
+        const speechThreshold = Math.max(
+          SPEECH_RMS_THRESHOLD,
+          noiseFloorRef.current * NOISE_THRESHOLD_MULTIPLIER + NOISE_THRESHOLD_MARGIN
+        );
+        const loud = rms > speechThreshold;
+
+        // Slowly follow changes in fan/traffic/room noise only before speech begins.
+        // Once an utterance starts, freeze the floor so quieter syllables cannot move
+        // the goalposts and get chopped off.
+        if (speechStartAtRef.current === null && !loud) {
+          noiseFloorRef.current = noiseFloorRef.current * 0.98 + rms * 0.02;
+        }
 
         if (loud) {
           loudStreakRef.current += 1;
@@ -269,17 +314,27 @@ export function useVoiceCall({ onUtterance, onInterrupt }: UseVoiceCallOptions) 
             pauseForReply();
           }
         } else if (elapsed >= MAX_UTTERANCE_MS) {
-          pauseForReply();
+          if (hadSpeech) {
+            pauseForReply();
+          } else {
+            // Rotate a long silent recording without sending room noise to STT.
+            discardRef.current = true;
+            stopSegmentRecorder();
+          }
         }
       }, CHECK_INTERVAL_MS);
+      setStarting(false);
+      return true;
     } catch (err) {
       micLevel.set(0);
       setPermissionError(
         err instanceof Error ? err.message : "Microphone access was denied or unavailable."
       );
       setInCall(false);
+      setStarting(false);
+      return false;
     }
-  }, [supported, inCall, startSegmentRecorder, stopSegmentRecorder, pauseForReply, micLevel, requestWakeLock]);
+  }, [supported, inCall, starting, startSegmentRecorder, stopSegmentRecorder, pauseForReply, micLevel, requestWakeLock]);
 
   const endCall = useCallback(() => {
     inCallRef.current = false;
@@ -299,6 +354,7 @@ export function useVoiceCall({ onUtterance, onInterrupt }: UseVoiceCallOptions) 
     if (wakeLock) void wakeLock.release().catch(() => {});
     setWakeLockStatus("wakeLock" in navigator ? "idle" : "unsupported");
     busyRef.current = false;
+    setCalibrating(false);
     micLevel.set(0);
     setInCall(false);
   }, [stopSegmentRecorder, micLevel]);
@@ -336,7 +392,9 @@ export function useVoiceCall({ onUtterance, onInterrupt }: UseVoiceCallOptions) 
   return {
     supported,
     inCall,
+    starting,
     permissionError,
+    calibrating,
     wakeLockStatus,
     micLevel,
     startCall,

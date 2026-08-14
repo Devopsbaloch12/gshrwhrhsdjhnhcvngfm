@@ -8,6 +8,8 @@ interface TranscriptCaptionProps {
   // Backend came back with an empty transcript: it heard the clip, there was no speech
   // in it. Shown while listening resumes, so the user knows to repeat themselves.
   heardNothing?: boolean;
+  calibrating?: boolean;
+  starting?: boolean;
 }
 
 export function TranscriptCaption({
@@ -15,10 +17,16 @@ export function TranscriptCaption({
   lastQuery,
   lastReply,
   heardNothing = false,
+  calibrating = false,
+  starting = false,
 }: TranscriptCaptionProps) {
   const text =
     status === "listening"
-      ? heardNothing
+      ? starting || calibrating
+        ? starting
+          ? "Connecting microphone…"
+          : "Calibrating your room noise… wait a moment"
+        : heardNothing
         ? "Didn’t catch that — say it again"
         : "Listening… just talk, I’ll know when you’re done"
       : status === "thinking"
@@ -28,7 +36,7 @@ export function TranscriptCaption({
           : lastQuery;
 
   const placeholder = "Tap the mic to start a call";
-  const muted = status === "listening" && heardNothing;
+  const muted = status === "listening" && (heardNothing || calibrating || starting);
 
   return (
     <div className="flex min-h-[2.75rem] w-full max-w-sm items-center justify-center px-4 text-center sm:max-w-md">
