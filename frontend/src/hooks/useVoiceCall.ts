@@ -13,8 +13,12 @@ import { useMotionValue } from "framer-motion";
 // Google Assistant instead of staying in this page. This hook only ever uses
 // getUserMedia + MediaRecorder + Web Audio, so it behaves identically everywhere.
 
-// Trailing quiet required to end an utterance.
-const SILENCE_MS = 1400;
+// Short conversational questions should endpoint quickly; longer explanations retain
+// more pause room. Production logs showed the previous fixed 1400ms as dead air after
+// every sentence even when the warm backend answered in about a second.
+const SHORT_UTTERANCE_SILENCE_MS = 650;
+const LONG_UTTERANCE_SILENCE_MS = 900;
+const LONG_UTTERANCE_AFTER_MS = 2500;
 const MAX_UTTERANCE_MS = 20000; // safety cutoff if someone just keeps talking
 const CHECK_INTERVAL_MS = 50;
 const SPEECH_RMS_THRESHOLD = 0.02;
@@ -24,7 +28,7 @@ const NOISE_THRESHOLD_MARGIN = 0.006;
 const SPEECH_CONFIRM_CHECKS = 2; // filters brief pops/clicks from counting as speech starting
 // Utterances shorter than this are noise/false-starts, not real speech - discard them
 // client-side instead of round-tripping a doomed empty-transcript request. Cutting
-// SILENCE_MS too low without this (an earlier mistake) meant ordinary micro-pauses
+// An endpoint delay that is too low without this guard can make ordinary micro-pauses
 // mid-sentence chopped real speech into garbage fragments, transcribed to nothing, and
 // silently looped "Thinking" -> "Listening" with no reply ever appearing.
 const MIN_SPEECH_MS = 300;
@@ -304,8 +308,13 @@ export function useVoiceCall({ onUtterance, onInterrupt }: UseVoiceCallOptions) 
         const elapsed = now - utteranceStartRef.current;
         const trailingSilence = lastLoudAtRef.current ? now - lastLoudAtRef.current : 0;
         const hadSpeech = lastLoudAtRef.current !== null;
+        const spokenFor = speechStartAtRef.current === null ? 0 : now - speechStartAtRef.current;
+        const requiredSilence =
+          spokenFor >= LONG_UTTERANCE_AFTER_MS
+            ? LONG_UTTERANCE_SILENCE_MS
+            : SHORT_UTTERANCE_SILENCE_MS;
 
-        if (hadSpeech && trailingSilence >= SILENCE_MS) {
+        if (hadSpeech && trailingSilence >= requiredSilence) {
           const speechDuration = lastLoudAtRef.current! - (speechStartAtRef.current ?? now);
           if (speechDuration < MIN_SPEECH_MS) {
             discardRef.current = true;
