@@ -77,9 +77,13 @@ def _apply_domain_vocab(text: str) -> str:
     return " ".join(words)
 
 
-def _looks_like_hallucination(text: str) -> bool:
+def _looks_like_hallucination(text: str, level: float) -> bool:
     stripped = text.strip().strip(_STRIP_CHARS).lower()
-    if stripped in _HALLUCINATION_ARTIFACTS:
+    # Common short phrases such as "thank you", "bye", and "you" are legitimate
+    # telephony answers when the recording has real signal. They are characteristic
+    # Whisper hallucinations only on near-silent clips. The old unconditional filter
+    # was visibly dropping genuine caller speech at levels as high as 0.05.
+    if stripped in _HALLUCINATION_ARTIFACTS and level < 0.012:
         return True
     return not any(ch.isalnum() for ch in stripped)
 
@@ -198,7 +202,7 @@ def transcribe(audio: np.ndarray, sr: int) -> str:
 
     fut = _pool.submit(wav.numpy())
     text = fut.result()
-    filtered = _looks_like_hallucination(text)
+    filtered = _looks_like_hallucination(text, level)
     print(
         "[STT] provider=%s samples=%d dur=%.2fs level=%.4f raw=%r filtered=%s"
         % (_PROVIDER, wav.numel(), duration, level, text[:120], filtered),

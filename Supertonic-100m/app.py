@@ -6,6 +6,7 @@ import audioop
 import io
 import json
 import time
+import uuid
 from pathlib import Path
 
 import numpy as np
@@ -355,7 +356,35 @@ async def api_converse_audio_route(request: Request):
 
 
 # --- telephony bridge routes (STT + TTS for the FE voicebot SelfHostedCore) ---
+def _telephony_request_id(request: Request) -> str:
+    # Prefer AVR's own correlation identifier if it sends one. Never use or log phone
+    # numbers; a generated short ID is enough to join STT/TTS timing safely.
+    for header in ("x-call-id", "x-session-id", "x-request-id", "x-correlation-id"):
+        value = request.headers.get(header, "").strip()
+        if value:
+            return "".join(ch for ch in value if ch.isalnum() or ch in "-_.")[:80]
+    return uuid.uuid4().hex[:12]
+
+
+def _classify_telephony_text(text: str) -> str:
+    normalized = " ".join(text.lower().split())
+    if any(phrase in normalized for phrase in (
+        "take me off", "remove me", "do not call", "don't call", "stop calling",
+    )):
+        return "opt_out"
+    if any(phrase in normalized for phrase in (
+        "leave a message", "after the tone", "not available", "can't take your call",
+        "cannot take your call", "please record", "voicemail", "voice mail",
+    )):
+        return "voicemail"
+    if normalized in ("beep", "beep."):
+        return "voicemail_beep"
+    return "speech" if normalized else "empty"
+
+
 async def api_transcriptions_route(request: Request):
+    started = time.perf_counter()
+    request_id = _telephony_request_id(request)
     auth = request.headers.get("authorization", "")
     key = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
     if not apikeys.is_valid(key):
@@ -371,10 +400,19 @@ async def api_transcriptions_route(request: Request):
     if getattr(audio, "ndim", 1) > 1:
         audio = audio.mean(axis=1)
     text = await run_in_threadpool(stt.transcribe, audio, sr)
-    return {"text": text or ""}
+    classification = _classify_telephony_text(text or "")
+    elapsed = time.perf_counter() - started
+    print(
+        f"[TELEPHONY] endpoint=stt id={request_id} latency={elapsed:.3f}s "
+        f"audio_sec={len(audio)/sr:.2f} classification={classification} chars={len(text or '')}",
+        flush=True,
+    )
+    return {"text": text or "", "classification": classification, "request_id": request_id}
 
 
 async def api_speech_route(request: Request):
+    started = time.perf_counter()
+    request_id = _telephony_request_id(request)
     auth = request.headers.get("authorization", "")
     key = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
     if not apikeys.is_valid(key):
@@ -389,7 +427,22 @@ async def api_speech_route(request: Request):
     clip, sr = await run_in_threadpool(tts.synthesize, text, voice, tts.DEFAULT_SPEED)
     pcm = (np.clip(clip, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
     pcm24, _st = audioop.ratecv(pcm, 2, 1, int(sr), 24000, None)
-    return Response(content=pcm24, media_type="application/octet-stream")
+    elapsed = time.perf_counter() - started
+    duration = len(clip) / sr if sr else 0.0
+    print(
+        f"[TELEPHONY] endpoint=tts id={request_id} latency={elapsed:.3f}s "
+        f"voice={voice} text_chars={len(text)} audio_sec={duration:.2f} bytes={len(pcm24)}",
+        flush=True,
+    )
+    return Response(
+        content=pcm24,
+        media_type="application/octet-stream",
+        headers={
+            "X-Request-ID": request_id,
+            "X-TTS-Latency-Ms": str(round(elapsed * 1000)),
+            "X-Audio-Duration-Ms": str(round(duration * 1000)),
+        },
+    )
 
 
 CUSTOM_CSS = """
