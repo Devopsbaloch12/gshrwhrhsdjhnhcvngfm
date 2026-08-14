@@ -370,6 +370,20 @@ export function VoiceAgentSection({ onNavigate }: { onNavigate: (id: SectionId) 
             disabled={!voiceCall.inCall && (apiKeys.length === 0 || connection === "offline")}
           />
 
+          {voiceCall.inCall && voiceCall.wakeLockStatus === "active" && (
+            <p className="max-w-xs text-center text-[11px] text-emerald-300/80">
+              Screen sleep is blocked while this call is active.
+            </p>
+          )}
+
+          {voiceCall.inCall &&
+            (voiceCall.wakeLockStatus === "unsupported" ||
+              voiceCall.wakeLockStatus === "unavailable") && (
+              <p className="max-w-xs text-center text-[11px] text-amber-300/90">
+                Keep this screen awake. Your browser may pause the microphone when the phone locks.
+              </p>
+            )}
+
           {connection === "offline" && !voiceCall.inCall && (
             <p className="max-w-xs text-center text-xs text-rose-300/90">
               Can’t reach the backend. Check the URL under Voice settings.

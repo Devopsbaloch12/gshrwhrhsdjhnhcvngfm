@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useMotionValue } from "framer-motion";
 
 // A real hands-free "call": tap once to start, then this auto-detects when you stop
@@ -66,11 +66,17 @@ export function useVoiceCall({ onUtterance, onInterrupt }: UseVoiceCallOptions) 
 
   const [inCall, setInCall] = useState(false);
   const [permissionError, setPermissionError] = useState<string | null>(null);
+  const [wakeLockStatus, setWakeLockStatus] = useState<
+    "unsupported" | "idle" | "active" | "unavailable"
+  >(() => (typeof navigator !== "undefined" && "wakeLock" in navigator ? "idle" : "unsupported"));
   // Live mic amplitude, already computed here for the VAD. Published as a MotionValue so
   // the UI can show the user's own voice moving the orb without a re-render per sample.
   const micLevel = useMotionValue(0);
 
   const streamRef = useRef<MediaStream | null>(null);
+  const inCallRef = useRef(false);
+  const endCallRef = useRef<() => void>(() => {});
+  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -94,6 +100,24 @@ export function useVoiceCall({ onUtterance, onInterrupt }: UseVoiceCallOptions) 
   onUtteranceRef.current = onUtterance;
   const onInterruptRef = useRef(onInterrupt);
   onInterruptRef.current = onInterrupt;
+
+  const requestWakeLock = useCallback(async () => {
+    if (!("wakeLock" in navigator) || document.visibilityState !== "visible") return;
+    try {
+      const sentinel = await navigator.wakeLock.request("screen");
+      wakeLockRef.current = sentinel;
+      setWakeLockStatus("active");
+      sentinel.addEventListener("release", () => {
+        if (wakeLockRef.current !== sentinel) return;
+        wakeLockRef.current = null;
+        if (inCallRef.current) setWakeLockStatus("unavailable");
+      });
+    } catch {
+      // Battery saver, device policy, or a non-visible document can deny this even
+      // when the API exists. Voice still works while the page remains awake.
+      if (inCallRef.current) setWakeLockStatus("unavailable");
+    }
+  }, []);
 
   const stopSegmentRecorder = useCallback(() => {
     const rec = recorderRef.current;
@@ -168,6 +192,13 @@ export function useVoiceCall({ onUtterance, onInterrupt }: UseVoiceCallOptions) 
         },
       });
       streamRef.current = stream;
+      for (const track of stream.getAudioTracks()) {
+        track.addEventListener("ended", () => {
+          if (!inCallRef.current) return;
+          setPermissionError("The microphone stopped while the call was active. Unlock the phone and start the call again.");
+          endCallRef.current();
+        });
+      }
 
       const audioCtx = new AudioContext();
       const source = audioCtx.createMediaStreamSource(stream);
@@ -180,7 +211,9 @@ export function useVoiceCall({ onUtterance, onInterrupt }: UseVoiceCallOptions) 
       busyRef.current = false;
       endedRef.current = false;
       startSegmentRecorder();
+      inCallRef.current = true;
       setInCall(true);
+      void requestWakeLock();
 
       const buf = new Uint8Array(analyser.fftSize);
       intervalRef.current = window.setInterval(() => {
@@ -246,9 +279,10 @@ export function useVoiceCall({ onUtterance, onInterrupt }: UseVoiceCallOptions) 
       );
       setInCall(false);
     }
-  }, [supported, inCall, startSegmentRecorder, stopSegmentRecorder, pauseForReply, micLevel]);
+  }, [supported, inCall, startSegmentRecorder, stopSegmentRecorder, pauseForReply, micLevel, requestWakeLock]);
 
   const endCall = useCallback(() => {
+    inCallRef.current = false;
     endedRef.current = true;
     if (intervalRef.current !== null) {
       window.clearInterval(intervalRef.current);
@@ -260,15 +294,50 @@ export function useVoiceCall({ onUtterance, onInterrupt }: UseVoiceCallOptions) 
     audioCtxRef.current?.close().catch(() => {});
     audioCtxRef.current = null;
     analyserRef.current = null;
+    const wakeLock = wakeLockRef.current;
+    wakeLockRef.current = null;
+    if (wakeLock) void wakeLock.release().catch(() => {});
+    setWakeLockStatus("wakeLock" in navigator ? "idle" : "unsupported");
     busyRef.current = false;
     micLevel.set(0);
     setInCall(false);
   }, [stopSegmentRecorder, micLevel]);
 
+  endCallRef.current = endCall;
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (!inCallRef.current || document.visibilityState !== "visible") return;
+
+      // Mobile browsers commonly suspend Web Audio and release wake locks when the
+      // screen locks or the app is backgrounded. Restore everything the browser still
+      // permits, and fail explicitly if the OS actually revoked the microphone.
+      const tracks = streamRef.current?.getAudioTracks() ?? [];
+      if (tracks.length === 0 || tracks.some((track) => track.readyState === "ended")) {
+        setPermissionError("The microphone was interrupted while the screen was off. Start the call again.");
+        endCallRef.current();
+        return;
+      }
+      void audioCtxRef.current?.resume().catch(() => {
+        setPermissionError("Audio could not resume after the screen was unlocked. Tap End, then start the call again.");
+      });
+      void requestWakeLock();
+      if (!busyRef.current && (!recorderRef.current || recorderRef.current.state === "inactive")) {
+        startSegmentRecorder();
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, [requestWakeLock, startSegmentRecorder]);
+
+  useEffect(() => () => endCallRef.current(), []);
+
   return {
     supported,
     inCall,
     permissionError,
+    wakeLockStatus,
     micLevel,
     startCall,
     endCall,
