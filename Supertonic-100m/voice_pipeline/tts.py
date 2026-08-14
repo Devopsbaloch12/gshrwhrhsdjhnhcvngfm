@@ -17,10 +17,14 @@ from .mp_batch_pool import MPBatchPool
 SAMPLE_RATE = 44100
 DEFAULT_VOICE = "F1"  # built-in voices: M1-M5 (male), F1-F5 (female)
 DEFAULT_SPEED = 1.05
-_MAX_BATCH = 32
-_BATCH_WINDOW_SEC = 0.01
+# On this CPU-only 4-vCPU VM, multi-item ONNX batches scale worse than individual
+# inference: an 8-user test measured ~1.3s for single jobs but 7.3-8.1s for requests
+# grouped into larger batches. Keep two 2-thread workers and let each process one job
+# at a time; the shared queue still distributes concurrent callers across both.
+_MAX_BATCH = 1
+_BATCH_WINDOW_SEC = 0.0
 _MAX_WAIT_SEC = 0.8  # caps how long a batch waits for laggards (e.g. slow upstream LLM calls)
-_NUM_WORKERS = 2
+_NUM_WORKERS = 4
 # Supertonic's own default is 8; a 20-concurrent stress-test target earlier dropped
 # this to 4, which measurably hurt clarity. But most of that "unclear" complaint was
 # actually the VAD chopping sentences into garbled fragments (fixed separately in
@@ -42,11 +46,10 @@ def _worker_init():
     # Concurrent requests already land in one batched forward pass per worker (see
     # _worker_batch), so the parallelism that matters most is threads-within-a-batch,
     # not worker count. Onnxruntime's default intra-op threads (= all cores) would let
-    # both _NUM_WORKERS processes each grab all 4 cores for themselves when their
-    # batches overlap, oversubscribing 2x. 2 threads x 2 workers = 4, matching the
-    # box's core count exactly with no contention.
+    # each worker grab all 4 cores when calls overlap. Four single-thread workers map
+    # directly to the box's four vCPUs and allow four independent callers to progress.
     return {
-        "tts": TTS(auto_download=True, intra_op_num_threads=2, inter_op_num_threads=1),
+        "tts": TTS(auto_download=True, intra_op_num_threads=1, inter_op_num_threads=1),
         "voice_cache": {},
     }
 

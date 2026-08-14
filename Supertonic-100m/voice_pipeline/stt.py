@@ -18,6 +18,7 @@ _MAX_BATCH = 8
 _BATCH_WINDOW_SEC = 0.01
 _NUM_WORKERS = 2
 _CPU_THREADS = 2
+_GROQ_WORKERS = 8
 
 _PROVIDER = os.environ.get("STT_PROVIDER", "moonshine").lower()
 _MIN_LEVEL = 0.005
@@ -163,11 +164,11 @@ _pool = None
 if mp.current_process().name == "MainProcess":
     if _PROVIDER == "groq":
         _pool = MPBatchPool(
-            1,  # single worker for API calls
+            _GROQ_WORKERS,
             _groq_worker_init,
             _groq_worker_batch,
-            _BATCH_WINDOW_SEC,
-            _MAX_BATCH,
+            0.0,
+            1,
         )
     else:  # moonshine (default)
         _pool = MPBatchPool(

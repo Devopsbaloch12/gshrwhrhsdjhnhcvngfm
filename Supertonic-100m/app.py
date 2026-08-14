@@ -153,9 +153,18 @@ def _run_converse(
     if emotion not in EMOTION_PRESETS:
         emotion = DEFAULT_EMOTION
     messages = (history or []) + [{"role": "user", "content": user_text}]
+    started = time.perf_counter()
     reply_text = llm.reply(messages, emotion=emotion)
+    llm_done = time.perf_counter()
     speed = EMOTION_PRESETS[emotion]["speed"]
     speech, speech_sr = tts.synthesize(reply_text, voice=voice, speed=speed)
+    finished = time.perf_counter()
+    print(
+        f"[PIPELINE] mode=text llm={llm_done-started:.2f}s "
+        f"tts={finished-llm_done:.2f}s total={finished-started:.2f}s "
+        f"reply_chars={len(reply_text)}",
+        flush=True,
+    )
     return reply_text, speech, speech_sr
 
 
@@ -169,7 +178,9 @@ def _run_converse_audio(
         audio_np, sr = decode_browser_audio(raw_audio_bytes)
     except AudioDecodeError as exc:
         raise ValueError(f"Couldn't process that recording: {exc}") from exc
+    started = time.perf_counter()
     user_text = stt.transcribe(audio_np, sr)
+    stt_done = time.perf_counter()
     if not user_text:
         # Not an error: the input gate rejecting silence/noise is the STT stage working
         # as intended, and it happens routinely mid-call. Raising here turned every such
@@ -182,8 +193,16 @@ def _run_converse_audio(
         emotion = DEFAULT_EMOTION
     messages = (history or []) + [{"role": "user", "content": user_text}]
     reply_text = llm.reply(messages, emotion=emotion)
+    llm_done = time.perf_counter()
     speed = EMOTION_PRESETS[emotion]["speed"]
     speech, speech_sr = tts.synthesize(reply_text, voice=voice, speed=speed)
+    finished = time.perf_counter()
+    print(
+        f"[PIPELINE] mode=audio stt={stt_done-started:.2f}s "
+        f"llm={llm_done-stt_done:.2f}s tts={finished-llm_done:.2f}s "
+        f"total={finished-started:.2f}s reply_chars={len(reply_text)}",
+        flush=True,
+    )
     return user_text, reply_text, speech, speech_sr
 
 
