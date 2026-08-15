@@ -15,7 +15,7 @@ import soundfile as sf
 from fastapi import HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
@@ -444,6 +444,49 @@ async def api_speech_route(request: Request):
         },
     )
 
+async def api_avr_speech_route(request: Request):
+    """AVR-native TTS: raw 8 kHz mono pcm_s16le in 20 ms frames."""
+    started = time.perf_counter()
+    request_id = _telephony_request_id(request)
+    auth = request.headers.get("authorization", "")
+    key = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+    if not apikeys.is_valid(key):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key.")
+    body = await request.json()
+    text = (body.get("text") or body.get("input") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text must not be empty.")
+    voice = body.get("voice") or tts.DEFAULT_VOICE
+    if voice not in VOICE_CHOICES:
+        voice = tts.DEFAULT_VOICE
+    clip, sr = await run_in_threadpool(tts.synthesize, text, voice, tts.DEFAULT_SPEED)
+    pcm = (np.clip(clip, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+    pcm8, _state = audioop.ratecv(pcm, 2, 1, int(sr), 8000, None)
+    elapsed = time.perf_counter() - started
+    duration = len(clip) / sr if sr else 0.0
+    print(
+        f"[TELEPHONY] endpoint=avr_tts id={request_id} latency={elapsed:.3f}s "
+        f"voice={voice} text_chars={len(text)} audio_sec={duration:.2f} "
+        f"sample_rate=8000 bytes={len(pcm8)}", flush=True,
+    )
+
+    def frames():
+        for offset in range(0, len(pcm8), 320):
+            yield pcm8[offset:offset + 320]
+
+    return StreamingResponse(
+        frames(), media_type="audio/l16",
+        headers={
+            "X-Request-ID": request_id,
+            "X-TTS-Latency-Ms": str(round(elapsed * 1000)),
+            "X-Audio-Duration-Ms": str(round(duration * 1000)),
+            "X-Audio-Sample-Rate": "8000",
+            "X-Audio-Sample-Width": "2",
+            "X-Audio-Channels": "1",
+            "X-Audio-Encoding": "pcm_s16le",
+            "X-Audio-Frame-Bytes": "320",
+        },
+    )
 
 CUSTOM_CSS = """
 :root {
@@ -756,6 +799,7 @@ if __name__ == "__main__":
     fastapi_app.add_api_route("/api/keys/revoke", api_revoke_key_route, methods=["POST"])
     fastapi_app.add_api_route("/audio/transcriptions", api_transcriptions_route, methods=["POST"])
     fastapi_app.add_api_route("/audio/speech", api_speech_route, methods=["POST"])
+    fastapi_app.add_api_route("/text-to-speech-stream", api_avr_speech_route, methods=["POST"])
 
     if FRONTEND_DIST.is_dir():
         # Serves the built React SPA under /app on this same port, same origin as
