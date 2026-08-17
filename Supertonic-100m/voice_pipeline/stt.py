@@ -18,7 +18,9 @@ _MAX_BATCH = 8
 _BATCH_WINDOW_SEC = 0.01
 _NUM_WORKERS = 2
 _CPU_THREADS = 2
-_GROQ_WORKERS = 8
+# Sized above the 20-call target: these workers only wait on Groq's Whisper HTTP
+# endpoint, so they cost no local CPU and oversizing avoids queueing at peak.
+_GROQ_WORKERS = 24
 
 _PROVIDER = os.environ.get("STT_PROVIDER", "moonshine").lower()
 _MIN_LEVEL = 0.005
