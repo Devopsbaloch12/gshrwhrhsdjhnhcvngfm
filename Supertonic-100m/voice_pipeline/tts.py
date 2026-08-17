@@ -25,12 +25,12 @@ DEFAULT_SPEED = 1.05
 _MAX_BATCH = 1
 _BATCH_WINDOW_SEC = 0.0
 _MAX_WAIT_SEC = 0.8  # caps how long a batch waits for laggards (e.g. slow upstream LLM calls)
-_NUM_WORKERS = 8
-# 15-call production profile on 16 vCPU: eight 2-thread workers saturate the box.
-# TTS is the only local CPU stage (STT and the LLM are both Groq API calls), and it
-# costs ~1.55 core-seconds per call, which caps throughput near 10 calls/s.
-# _TOTAL_STEPS trades fidelity for latency roughly linearly - measured medians at 15
-# concurrent: 8 steps 2.06s, 6 steps 1.68s, 4 steps 1.23s.
+_NUM_WORKERS = 6
+# 16-vCPU profile. Six 2-thread workers here (12 threads) leave room for the local
+# Moonshine STT pool; TTS had all eight workers back when STT was a remote API call.
+# TTS costs ~1.55 core-seconds per call, which caps throughput near 5 calls/s once
+# STT shares the box. _TOTAL_STEPS trades fidelity for latency roughly linearly -
+# measured medians at 15 concurrent: 8 steps 2.06s, 6 steps 1.68s, 4 steps 1.23s.
 _TOTAL_STEPS = 6
 
 
@@ -45,10 +45,10 @@ def _worker_init():
     from supertonic import TTS
 
     # Onnxruntime's default intra-op threads (= all cores) would let each worker grab
-    # every core when calls overlap. Eight 2-thread workers map to the box's 16 vCPUs
-    # so eight callers progress independently. Note that pinning OMP_NUM_THREADS=1 on
-    # top of this measured *worse* (2.45 vs 2.93 calls/s) - onnxruntime genuinely uses
-    # the threads it spawns, so leave the math libraries unpinned.
+    # every core when calls overlap. Six 2-thread workers bound TTS to 12 of the 16
+    # vCPUs so the Moonshine STT pool still gets cores. Note that pinning
+    # OMP_NUM_THREADS=1 on top of this measured *worse* (2.45 vs 2.93 calls/s) -
+    # onnxruntime genuinely uses the threads it spawns, so leave math libs unpinned.
     return {
         "tts": TTS(auto_download=True, intra_op_num_threads=2, inter_op_num_threads=1),
         "voice_cache": {},

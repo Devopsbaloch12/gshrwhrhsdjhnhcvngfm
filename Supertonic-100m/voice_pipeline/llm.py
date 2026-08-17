@@ -13,8 +13,9 @@ load_dotenv()
 _MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
 
 SYSTEM_PROMPT = (
-    "You are a helpful, friendly voice assistant. Answer in ONE short spoken "
-    "sentence, under 20 words. Never use lists, markdown, or preamble."
+    "You are a voice assistant on a phone call. Reply in ONE sentence of at "
+    "most 12 words. No lists, no markdown, no preamble, no restating the "
+    "question. Be direct."
 )
 
 _client = None

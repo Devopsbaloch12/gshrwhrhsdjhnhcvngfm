@@ -16,8 +16,12 @@ from .mp_batch_pool import MPBatchPool
 SAMPLE_RATE = 16000
 _MAX_BATCH = 8
 _BATCH_WINDOW_SEC = 0.01
-_NUM_WORKERS = 2
-_CPU_THREADS = 2
+# Moonshine runs locally, so unlike the remote Groq path its thread count is a real
+# latency dial: raising _CPU_THREADS 1 -> 4 cut STT from 0.61s to 0.34s per turn.
+# 4 workers x 4 threads intentionally oversubscribes alongside TTS's 12 - it measured
+# best at every concurrency from 1 to 30.
+_NUM_WORKERS = 4
+_CPU_THREADS = 4
 # Sized above the 20-call target: these workers only wait on Groq's Whisper HTTP
 # endpoint, so they cost no local CPU and oversizing avoids queueing at peak.
 _GROQ_WORKERS = 24

@@ -116,7 +116,9 @@ def generate_api_key():
 # How many prior messages (user+assistant combined) to replay to the LLM. Each turn
 # contributes two. Keep the latest 20 exchanges: enough for a sustained voice session
 # while still bounding untrusted client input and request size.
-_MAX_HISTORY_MESSAGES = 40
+# Resent in full on every turn, so this is upload size and LLM prompt cost per turn,
+# not just memory. 12 keeps several turns of context without growing unbounded.
+_MAX_HISTORY_MESSAGES = 12
 
 
 def _coerce_history(raw) -> list[dict]:
