@@ -17,11 +17,12 @@ from fastapi import HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
+from starlette.requests import ClientDisconnect
 from starlette.routing import Route
 
 FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
-from voice_pipeline import vad, stt, llm, tts, apikeys
+from voice_pipeline import vad, stt, llm, tts, apikeys, avr
 from voice_pipeline.audio_utils import to_mono_tensor, decode_browser_audio, AudioDecodeError
 from voice_pipeline.emotions import DEFAULT_EMOTION, EMOTION_PRESETS, VOICE_CHOICES
 from voice_pipeline.sentences import chunk_stream
@@ -447,6 +448,76 @@ async def api_speech_route(request: Request):
             "X-Audio-Duration-Ms": str(round(duration * 1000)),
         },
     )
+
+# AVR Core reaches these endpoints over the internal network and has no mechanism to
+# carry an API key, so a private-network peer is trusted. A public caller must still
+# present a Bearer key, which keeps /speech-to-text-stream and /prompt-stream from
+# becoming an unauthenticated compute faucet if port 7860 is ever exposed.
+_AVR_TRUSTED_PREFIXES = ("127.", "10.", "192.168.", "172.16.", "172.17.", "172.18.",
+                         "172.19.", "172.2", "172.30.", "172.31.")
+
+
+def _avr_authorized(request: Request) -> bool:
+    """True if the caller is on a private network or presents a valid Bearer key."""
+    host = (request.client.host if request.client else "") or ""
+    if host == "::1" or host.startswith(_AVR_TRUSTED_PREFIXES):
+        return True
+    auth = request.headers.get("authorization", "")
+    key = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+    return apikeys.is_valid(key)
+
+
+async def avr_speech_to_text_stream_route(request: Request):
+    """POST /speech-to-text-stream - AVR Core ASR contract.
+
+    Raw 8 kHz mono pcm_s16le arrives chunked in the request body for the life of the
+    call leg; each completed utterance is written back as bare UTF-8 text. Auth is a
+    Bearer token to match the TTS route, but is skipped when the caller is on the
+    loopback/private interface, because AVR Core reaches these services over the
+    internal network and has no place to carry a key.
+    """
+    request_id = _telephony_request_id(request)
+    if not _avr_authorized(request):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key.")
+    try:
+        pcm = await request.body()
+    except ClientDisconnect:
+        print(f"[AVR][ASR] id={request_id} caller hung up before audio arrived", flush=True)
+        return Response(status_code=204)
+    if not pcm:
+        raise HTTPException(status_code=400, detail="audio body must not be empty.")
+    texts = await run_in_threadpool(avr.transcribe_pcm8k, pcm, request_id)
+    return Response(
+        content="".join(texts).encode("utf-8"),
+        media_type="text/event-stream",
+        headers={"X-Request-ID": request_id, "Cache-Control": "no-cache"},
+    )
+
+
+async def avr_prompt_stream_route(request: Request):
+    """POST /prompt-stream - AVR Core LLM contract.
+
+    Body is {"messages": [...], "uuid": "..."}; the response is a stream of
+    {"type": "text", "content": "..."} objects, one per model delta.
+    """
+    if not _avr_authorized(request):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key.")
+    try:
+        body = await request.json()
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Malformed JSON body: {exc}") from exc
+    messages = _coerce_history(body.get("messages"))
+    if not messages:
+        raise HTTPException(status_code=400, detail="messages is required.")
+    call_uuid = str(body.get("uuid") or "").strip()
+    if not call_uuid:
+        raise HTTPException(status_code=400, detail="uuid is required.")
+    return StreamingResponse(
+        avr.prompt_stream(messages, call_uuid),
+        media_type="text/event-stream",
+        headers={"X-Call-UUID": call_uuid, "Cache-Control": "no-cache"},
+    )
+
 
 async def api_avr_speech_route(request: Request):
     """AVR-native TTS: raw 8 kHz mono pcm_s16le in 20 ms frames."""
@@ -905,6 +976,8 @@ if __name__ == "__main__":
     fastapi_app.add_api_route("/audio/transcriptions", api_transcriptions_route, methods=["POST"])
     fastapi_app.add_api_route("/audio/speech", api_speech_route, methods=["POST"])
     fastapi_app.add_api_route("/text-to-speech-stream", api_avr_speech_route, methods=["POST"])
+    fastapi_app.add_api_route("/speech-to-text-stream", avr_speech_to_text_stream_route, methods=["POST"])
+    fastapi_app.add_api_route("/prompt-stream", avr_prompt_stream_route, methods=["POST"])
 
     if FRONTEND_DIST.is_dir():
         # Serves the built React SPA under /app on this same port, same origin as
