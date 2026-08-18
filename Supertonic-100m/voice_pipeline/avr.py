@@ -27,6 +27,7 @@ from typing import AsyncIterator, Iterator
 import numpy as np
 
 from . import llm, stt, vad
+from .sentences import chunk_stream
 
 # Asterisk AudioSocket carries signed-linear 8 kHz mono; the STT models want 16 kHz.
 AVR_SAMPLE_RATE = 8000
@@ -215,7 +216,10 @@ def prompt_stream(messages: list[dict], uuid: str) -> Iterator[bytes]:
     first_at: float | None = None
     chars = 0
     try:
-        for piece in llm.reply_stream(messages):
+        # Emit whole sentences rather than raw token deltas. AVR Core forwards each
+        # unit it receives to TTS, and a per-token unit would mean one synthesis call
+        # per word - the chunker is what lets Core pipeline speech against generation.
+        for piece in chunk_stream(llm.reply_stream(messages)):
             if not piece:
                 continue
             if first_at is None:

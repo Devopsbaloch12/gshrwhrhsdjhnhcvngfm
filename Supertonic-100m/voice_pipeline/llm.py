@@ -11,6 +11,8 @@ from .emotions import DEFAULT_EMOTION, EMOTION_PRESETS
 load_dotenv()
 
 _MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
+# Tunable so long-reply load tests can exceed the short conversational default.
+_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "200"))
 
 SYSTEM_PROMPT = os.environ.get("SYSTEM_PROMPT_OVERRIDE") or (
     "You are a voice assistant on a phone call. Reply in ONE sentence of at "
@@ -47,7 +49,7 @@ def reply(history: list[dict], emotion: str = DEFAULT_EMOTION) -> str:
     # reasoning_effort="low" cuts reasoning to ~9 tokens; the cap is headroom, and the
     # system prompt (not the cap) is what keeps replies short enough to speak quickly.
     completion = client.chat.completions.create(
-        model=_MODEL, messages=messages, max_tokens=200, temperature=0.5,
+        model=_MODEL, messages=messages, max_tokens=_MAX_TOKENS, temperature=0.5,
         reasoning_effort="low",
     )
     text = completion.choices[0].message.content.strip()
@@ -73,7 +75,7 @@ def reply_stream(history: list[dict], emotion: str = DEFAULT_EMOTION):
     chars = 0
     print(f"[LLM] model={_MODEL} stream=1 context_messages={len(history)}", flush=True)
     stream = client.chat.completions.create(
-        model=_MODEL, messages=messages, max_tokens=200, temperature=0.5,
+        model=_MODEL, messages=messages, max_tokens=_MAX_TOKENS, temperature=0.5,
         reasoning_effort="low", stream=True, timeout=5.0,
     )
     for chunk in stream:

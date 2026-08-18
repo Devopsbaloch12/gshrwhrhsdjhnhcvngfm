@@ -444,8 +444,6 @@ async def api_speech_route(request: Request):
         media_type="application/octet-stream",
         headers={
             "X-Request-ID": request_id,
-            "X-TTS-Latency-Ms": str(round(elapsed * 1000)),
-            "X-Audio-Duration-Ms": str(round(duration * 1000)),
         },
     )
 
@@ -534,27 +532,57 @@ async def api_avr_speech_route(request: Request):
     voice = body.get("voice") or tts.DEFAULT_VOICE
     if voice not in VOICE_CHOICES:
         voice = tts.DEFAULT_VOICE
-    clip, sr = await run_in_threadpool(tts.synthesize, text, voice, tts.DEFAULT_SPEED)
-    pcm = (np.clip(clip, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
-    pcm8, _state = audioop.ratecv(pcm, 2, 1, int(sr), 8000, None)
-    elapsed = time.perf_counter() - started
-    duration = len(clip) / sr if sr else 0.0
-    print(
-        f"[TELEPHONY] endpoint=avr_tts id={request_id} latency={elapsed:.3f}s "
-        f"voice={voice} text_chars={len(text)} audio_sec={duration:.2f} "
-        f"sample_rate=8000 bytes={len(pcm8)}", flush=True,
-    )
+    # Supertonic's ONNX graph is fixed at 1000 frames and the batched worker path
+    # bypasses the library's own text-chunking wrapper, so a single long string fails
+    # outright ("broadcast ... 1000 by 3542") rather than degrading. Anything past a
+    # couple of sentences must therefore be split before synthesis. Reuse the same
+    # chunker the streaming route uses so telephony and browser cut text identically.
+    chunks = list(chunk_stream([text])) or [text]
 
-    def frames():
-        for offset in range(0, len(pcm8), 320):
-            yield pcm8[offset:offset + 320]
+    async def frames():
+        """Synthesize chunk by chunk, emitting 20 ms frames as each one finishes.
+
+        Synthesizing the whole reply before sending a byte made time-to-first-audio a
+        function of total reply length: a 25-sentence answer meant ~9s of silence. Here
+        the first frame leaves as soon as the first sentence is ready, and the rest is
+        produced while the caller is already listening. Resampler state is carried
+        across chunks so joins do not click.
+        """
+        rate_state = None
+        first_at = None
+        audio_sec = 0.0
+        sent = 0
+        for piece in chunks:
+            try:
+                clip, sr = await run_in_threadpool(
+                    tts.synthesize, piece, voice, tts.DEFAULT_SPEED
+                )
+            except Exception as exc:  # noqa: BLE001 - one bad chunk must not kill the turn
+                print(
+                    f"[TELEPHONY] endpoint=avr_tts id={request_id} chunk failed: "
+                    f"{type(exc).__name__}: {exc}", flush=True,
+                )
+                continue
+            if first_at is None:
+                first_at = time.perf_counter()
+            audio_sec += len(clip) / sr if sr else 0.0
+            pcm = (np.clip(clip, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+            pcm8, rate_state = audioop.ratecv(pcm, 2, 1, int(sr), 8000, rate_state)
+            for offset in range(0, len(pcm8), 320):
+                sent += 1
+                yield pcm8[offset:offset + 320]
+        ttfa = (first_at - started) if first_at else (time.perf_counter() - started)
+        print(
+            f"[TELEPHONY] endpoint=avr_tts id={request_id} ttfa={ttfa:.3f}s "
+            f"total={time.perf_counter() - started:.3f}s voice={voice} "
+            f"text_chars={len(text)} chunks={len(chunks)} audio_sec={audio_sec:.2f} "
+            f"frames={sent} sample_rate=8000", flush=True,
+        )
 
     return StreamingResponse(
         frames(), media_type="audio/l16",
         headers={
             "X-Request-ID": request_id,
-            "X-TTS-Latency-Ms": str(round(elapsed * 1000)),
-            "X-Audio-Duration-Ms": str(round(duration * 1000)),
             "X-Audio-Sample-Rate": "8000",
             "X-Audio-Sample-Width": "2",
             "X-Audio-Channels": "1",
