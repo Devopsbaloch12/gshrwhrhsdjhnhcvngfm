@@ -9,8 +9,11 @@ from .audio_utils import to_mono_tensor
 SAMPLE_RATE = 16000
 # Trailing silence before an utterance is considered finished. This is dead air on
 # every turn, paid before any work starts, so it lands directly in perceived latency:
-# 0.8s was the single largest contributor to a ~3s felt response on a ~1.1s pipeline.
-END_SILENCE_SEC = 0.45
+# 0.8s was the single largest contributor to a ~3s felt response on a ~1.1s pipeline,
+# but 0.45s proved too aggressive in practice: it clipped the tail of normal speech
+# and Moonshine transcribed the fragment, so turns came back garbled. 0.75s is the
+# compromise - accuracy matters more than the 0.3s it costs.
+END_SILENCE_SEC = 0.75
 MAX_UTTERANCE_SEC = 20.0  # safety cutoff if someone just keeps talking
 PREROLL_SEC = 1.0  # how much trailing buffer to keep while waiting for speech to start
 

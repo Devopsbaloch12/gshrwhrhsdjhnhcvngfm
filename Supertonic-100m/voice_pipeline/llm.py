@@ -7,8 +7,11 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from .emotions import DEFAULT_EMOTION, EMOTION_PRESETS
+from .obs import get_logger, kv, turn_id
 
 load_dotenv()
+
+_log = get_logger("llm")
 
 _MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
 # Tunable so long-reply load tests can exceed the short conversational default.
@@ -42,7 +45,7 @@ def reply(history: list[dict], emotion: str = DEFAULT_EMOTION) -> str:
     system_prompt = f"{SYSTEM_PROMPT} {tone}"
     messages = [{"role": "system", "content": system_prompt}] + history
     started = time.perf_counter()
-    print(f"[LLM] model={_MODEL} context_messages={len(history)}", flush=True)
+    _log.info(kv(turn=turn_id(), model=_MODEL, context_messages=len(history)))
     # gpt-oss-20b is a reasoning model: it spends completion tokens on a reasoning pass
     # before emitting content. A tight max_tokens (80) was consumed entirely by that
     # pass - 78 of 80 tokens - returning empty content with finish_reason="length".
@@ -54,7 +57,7 @@ def reply(history: list[dict], emotion: str = DEFAULT_EMOTION) -> str:
     )
     text = completion.choices[0].message.content.strip()
     elapsed = time.perf_counter() - started
-    print(f"[LLM] model={_MODEL} latency={elapsed:.2f}s reply_chars={len(text)}", flush=True)
+    _log.info(kv(turn=turn_id(), model=_MODEL, latency=elapsed, reply_chars=len(text)))
     return text
 
 
@@ -73,7 +76,7 @@ def reply_stream(history: list[dict], emotion: str = DEFAULT_EMOTION):
     started = time.perf_counter()
     first_at = None
     chars = 0
-    print(f"[LLM] model={_MODEL} stream=1 context_messages={len(history)}", flush=True)
+    _log.info(kv(turn=turn_id(), model=_MODEL, stream=1, context_messages=len(history)))
     stream = client.chat.completions.create(
         model=_MODEL, messages=messages, max_tokens=_MAX_TOKENS, temperature=0.5,
         reasoning_effort="low", stream=True, timeout=5.0,

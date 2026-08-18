@@ -28,8 +28,11 @@ import numpy as np
 
 from . import llm, stt, vad
 from .sentences import chunk_stream
+from .obs import get_logger, kv, turn_id
 
 # Asterisk AudioSocket carries signed-linear 8 kHz mono; the STT models want 16 kHz.
+_log = get_logger("avr")
+
 AVR_SAMPLE_RATE = 8000
 STT_SAMPLE_RATE = 16000
 _BYTES_PER_SAMPLE = 2
@@ -78,7 +81,7 @@ def _transcribe(buffer: np.ndarray) -> str:
     try:
         return (stt.transcribe(buffer, STT_SAMPLE_RATE) or "").strip()
     except Exception as exc:  # noqa: BLE001 - any model failure is non-fatal here
-        print(f"[AVR][ASR] transcribe failed: {type(exc).__name__}: {exc}", flush=True)
+        _log.error(kv(stage="asr", error=f"{type(exc).__name__}: {exc}"))
         return ""
 
 

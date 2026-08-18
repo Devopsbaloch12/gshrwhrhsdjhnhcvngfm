@@ -26,6 +26,8 @@ from voice_pipeline import vad, stt, llm, tts, apikeys, avr
 from voice_pipeline.audio_utils import to_mono_tensor, decode_browser_audio, AudioDecodeError
 from voice_pipeline.emotions import DEFAULT_EMOTION, EMOTION_PRESETS, VOICE_CHOICES
 from voice_pipeline.sentences import chunk_stream
+from voice_pipeline.obs import get_logger, kv, new_turn_id, set_turn_id
+from voice_pipeline import audiosocket_server
 
 PREROLL_SAMPLES = int(vad.PREROLL_SEC * vad.SAMPLE_RATE)
 PLAYBACK_MARGIN_SEC = 0.8  # extra pause after TTS finishes, to avoid the mic hearing the tail end
@@ -120,8 +122,12 @@ def generate_api_key():
 # contributes two. Keep the latest 20 exchanges: enough for a sustained voice session
 # while still bounding untrusted client input and request size.
 # Resent in full on every turn, so this is upload size and LLM prompt cost per turn,
-# not just memory. 12 keeps several turns of context without growing unbounded.
-_MAX_HISTORY_MESSAGES = 12
+# not just memory. 12 was too tight: it is only six exchanges, after which the oldest
+# turn silently drops out of the prompt and the assistant appears to lose the thread
+# mid-conversation. 30 is fifteen exchanges, still far below the model's context.
+_log = get_logger("app")
+
+_MAX_HISTORY_MESSAGES = 30
 
 
 def _coerce_history(raw) -> list[dict]:
@@ -986,6 +992,7 @@ def _warmup():
     except Exception as exc:  # don't block startup if warmup itself fails
         print(f"Warmup skipped a step: {exc}", flush=True)
     print(f"Warmup done in {time.time() - t0:.2f}s", flush=True)
+    audiosocket_server.start_in_background()
 
 
 if __name__ == "__main__":
