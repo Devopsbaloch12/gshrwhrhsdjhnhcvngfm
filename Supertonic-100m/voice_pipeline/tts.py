@@ -17,18 +17,21 @@ from .mp_batch_pool import MPBatchPool
 SAMPLE_RATE = 44100
 DEFAULT_VOICE = "F1"  # built-in voices: M1-M5 (male), F1-F5 (female)
 DEFAULT_SPEED = 1.05
-# On this CPU-only 4-vCPU VM, multi-item ONNX batches scale worse than individual
-# inference: an 8-user test measured ~1.3s for single jobs but 7.3-8.1s for requests
-# grouped into larger batches. Keep two 2-thread workers and let each process one job
-# at a time; the shared queue still distributes concurrent callers across both.
+# Multi-item ONNX batches still lose to individual inference, now confirmed on the
+# 16-vCPU box too: enabling _MAX_BATCH=4 measured 11.6s wall for 20 concurrent vs 6.8s
+# unbatched, as the workers contend for cores. (Isolated micro-benchmarks suggest the
+# opposite - 1.55 core-s/item batched vs 2.59 unbatched - but that gain does not
+# survive eight workers running batches at once.) Keep one job per worker.
 _MAX_BATCH = 1
 _BATCH_WINDOW_SEC = 0.0
 _MAX_WAIT_SEC = 0.8  # caps how long a batch waits for laggards (e.g. slow upstream LLM calls)
-_NUM_WORKERS = 2
-# Four-call production profile: spend more compute on each voice instead of optimizing
-# for the old eight-call target. Ten denoising steps improves fidelity over the default
-# eight while two 2-thread workers keep all four vCPUs useful under overlap.
-_TOTAL_STEPS = 10
+_NUM_WORKERS = 6
+# 16-vCPU profile. Six 2-thread workers here (12 threads) leave room for the local
+# Moonshine STT pool; TTS had all eight workers back when STT was a remote API call.
+# TTS costs ~1.55 core-seconds per call, which caps throughput near 5 calls/s once
+# STT shares the box. _TOTAL_STEPS trades fidelity for latency roughly linearly -
+# measured medians at 15 concurrent: 8 steps 2.06s, 6 steps 1.68s, 4 steps 1.23s.
+_TOTAL_STEPS = 6
 
 
 def _worker_init():
@@ -41,11 +44,11 @@ def _worker_init():
     _loader.DEFAULT_ONNX_PROVIDERS = ["CUDAExecutionProvider", "CPUExecutionProvider"]
     from supertonic import TTS
 
-    # Concurrent requests already land in one batched forward pass per worker (see
-    # _worker_batch), so the parallelism that matters most is threads-within-a-batch,
-    # not worker count. Onnxruntime's default intra-op threads (= all cores) would let
-    # each worker grab all 4 cores when calls overlap. Four single-thread workers map
-    # directly to the box's four vCPUs and allow four independent callers to progress.
+    # Onnxruntime's default intra-op threads (= all cores) would let each worker grab
+    # every core when calls overlap. Six 2-thread workers bound TTS to 12 of the 16
+    # vCPUs so the Moonshine STT pool still gets cores. Note that pinning
+    # OMP_NUM_THREADS=1 on top of this measured *worse* (2.45 vs 2.93 calls/s) -
+    # onnxruntime genuinely uses the threads it spawns, so leave math libs unpinned.
     return {
         "tts": TTS(auto_download=True, intra_op_num_threads=2, inter_op_num_threads=1),
         "voice_cache": {},
