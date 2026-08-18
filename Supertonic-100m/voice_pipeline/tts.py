@@ -25,13 +25,19 @@ DEFAULT_SPEED = 1.05
 _MAX_BATCH = 1
 _BATCH_WINDOW_SEC = 0.0
 _MAX_WAIT_SEC = 0.8  # caps how long a batch waits for laggards (e.g. slow upstream LLM calls)
-_NUM_WORKERS = 6
-# 16-vCPU profile. Six 2-thread workers here (12 threads) leave room for the local
-# Moonshine STT pool; TTS had all eight workers back when STT was a remote API call.
-# TTS costs ~1.55 core-seconds per call, which caps throughput near 5 calls/s once
-# STT shares the box. _TOTAL_STEPS trades fidelity for latency roughly linearly -
-# measured medians at 15 concurrent: 8 steps 2.06s, 6 steps 1.68s, 4 steps 1.23s.
-_TOTAL_STEPS = 6
+_NUM_WORKERS = 8
+# 16-vCPU profile. Eight 2-thread workers (16 threads) alongside the STT pool's own
+# 8x2 deliberately oversubscribes the box 2:1, which measured better than any matched
+# split at every concurrency tested from 1 to 30 - the stages are sequential within a
+# call, so they rarely peak together.
+#
+# Whole-pipeline cost measured at 1.95 core-seconds per call, capping throughput near
+# 8.2 calls/s. _TOTAL_STEPS trades fidelity for latency roughly linearly; medians at
+# 15 concurrent: 8 steps 2.06s, 6 steps 1.68s, 4 steps 1.23s. Six is the original
+# fidelity and misses a 2s p95 by 36ms at 10 concurrent; four clears it outright, which
+# is why it is the default here. Raise it back to 6 if the voice matters more than the
+# last 350ms.
+_TOTAL_STEPS = 4
 
 
 def _worker_init():
@@ -45,8 +51,7 @@ def _worker_init():
     from supertonic import TTS
 
     # Onnxruntime's default intra-op threads (= all cores) would let each worker grab
-    # every core when calls overlap. Six 2-thread workers bound TTS to 12 of the 16
-    # vCPUs so the Moonshine STT pool still gets cores. Note that pinning
+    # every core when calls overlap, so each is capped at 2. Note that pinning
     # OMP_NUM_THREADS=1 on top of this measured *worse* (2.45 vs 2.93 calls/s) -
     # onnxruntime genuinely uses the threads it spawns, so leave math libs unpinned.
     return {

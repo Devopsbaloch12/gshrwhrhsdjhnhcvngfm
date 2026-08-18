@@ -18,10 +18,14 @@ _MAX_BATCH = 8
 _BATCH_WINDOW_SEC = 0.01
 # Moonshine runs locally, so unlike the remote Groq path its thread count is a real
 # latency dial: raising _CPU_THREADS 1 -> 4 cut STT from 0.61s to 0.34s per turn.
-# 4 workers x 4 threads intentionally oversubscribes alongside TTS's 12 - it measured
-# best at every concurrency from 1 to 30.
-_NUM_WORKERS = 4
-_CPU_THREADS = 4
+# Deployed as 8 workers x 2 threads (see .env), which beat 4x4 by ~0.6s of p95 at 15
+# concurrent - more workers absorb bursts better than wider ones go fast.
+_NUM_WORKERS = int(os.environ.get("STT_WORKERS", "4"))
+_CPU_THREADS = int(os.environ.get("STT_THREADS", "4"))
+# Beam search runs num_beams hypotheses per clip - 5 beams is ~5x the decode compute
+# of greedy on CPU, which dominates STT cost once several callers overlap.
+_BEAMS = int(os.environ.get("STT_BEAMS", "5"))
+_QUANT = os.environ.get("STT_QUANT", "0") == "1"
 # Sized above the 20-call target: these workers only wait on Groq's Whisper HTTP
 # endpoint, so they cost no local CPU and oversizing avoids queueing at peak.
 _GROQ_WORKERS = 24
@@ -106,6 +110,16 @@ def _moonshine_worker_init():
     proc = AutoProcessor.from_pretrained("UsefulSensors/moonshine-base")
     model = MoonshineForConditionalGeneration.from_pretrained("UsefulSensors/moonshine-base")
     model.eval()
+    if _QUANT:
+        # Dynamic int8 on Linear only: the conv frontend stays fp32 (quantizing it
+        # measured no faster and hurt transcripts). Falls back to fp32 if the
+        # installed torch build has no qnnpack/fbgemm kernels for this shape.
+        try:
+            model = torch.ao.quantization.quantize_dynamic(
+                model, {torch.nn.Linear}, dtype=torch.qint8
+            )
+        except Exception as exc:
+            print(f"[STT] int8 quantization unavailable, staying fp32: {exc}", flush=True)
     return {"processor": proc, "model": model, "device": "cpu"}
 
 
@@ -118,7 +132,7 @@ def _moonshine_worker_batch(state, items):
         generated_ids = state["model"].generate(
             **inputs,
             max_new_tokens=180,
-            num_beams=5,
+            num_beams=_BEAMS,
             no_repeat_ngram_size=3,
             repetition_penalty=1.2,
         )

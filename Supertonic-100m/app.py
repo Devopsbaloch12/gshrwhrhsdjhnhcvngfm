@@ -8,6 +8,7 @@ import json
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 import numpy as np
 import gradio as gr
@@ -23,6 +24,7 @@ FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 from voice_pipeline import vad, stt, llm, tts, apikeys
 from voice_pipeline.audio_utils import to_mono_tensor, decode_browser_audio, AudioDecodeError
 from voice_pipeline.emotions import DEFAULT_EMOTION, EMOTION_PRESETS, VOICE_CHOICES
+from voice_pipeline.sentences import chunk_stream
 
 PREROLL_SAMPLES = int(vad.PREROLL_SEC * vad.SAMPLE_RATE)
 PLAYBACK_MARGIN_SEC = 0.8  # extra pause after TTS finishes, to avoid the mic hearing the tail end
@@ -490,6 +492,106 @@ async def api_avr_speech_route(request: Request):
         },
     )
 
+STREAM_SAMPLE_RATE = 24000
+
+
+def _stream_converse_audio(user_text, voice, emotion, history):
+    """Yield 24 kHz pcm_s16le for the reply, one synthesized chunk at a time.
+
+    The blocking path waits for the entire reply before synthesizing any of it, so the
+    caller's wait scales with the whole answer. Here each chunk is spoken as soon as the
+    LLM has produced enough text to say, which makes time-to-first-audio a function of
+    the first chunk alone. Synchronous by design - StreamingResponse iterates it in a
+    threadpool, and the TTS pool it calls is process-based.
+    """
+    if voice not in VOICE_CHOICES:
+        voice = tts.DEFAULT_VOICE
+    if emotion not in EMOTION_PRESETS:
+        emotion = DEFAULT_EMOTION
+    speed = EMOTION_PRESETS[emotion]["speed"]
+    messages = (history or []) + [{"role": "user", "content": user_text}]
+
+    started = time.perf_counter()
+    first_audio_at = None
+    chunks = 0
+    total_chars = 0
+    audio_sec = 0.0
+    try:
+        for piece in chunk_stream(llm.reply_stream(messages, emotion=emotion)):
+            clip, sr = tts.synthesize(piece, voice=voice, speed=speed)
+            if first_audio_at is None:
+                first_audio_at = time.perf_counter()
+            chunks += 1
+            total_chars += len(piece)
+            audio_sec += (len(clip) / sr) if sr else 0.0
+            pcm = (np.clip(clip, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+            if int(sr) != STREAM_SAMPLE_RATE:
+                pcm, _s = audioop.ratecv(pcm, 2, 1, int(sr), STREAM_SAMPLE_RATE, None)
+            yield pcm
+    except Exception as exc:  # a mid-stream failure must not hang the caller
+        print(f"[STREAM] aborted after {chunks} chunks: {type(exc).__name__}: {exc}", flush=True)
+        raise
+    finished = time.perf_counter()
+    ttfa = (first_audio_at - started) if first_audio_at else finished - started
+    print(
+        f"[STREAM] mode=audio chunks={chunks} ttfa={ttfa:.2f}s "
+        f"total={finished-started:.2f}s reply_chars={total_chars} "
+        f"audio_sec={audio_sec:.2f}",
+        flush=True,
+    )
+
+
+async def api_converse_audio_stream_route(request: Request):
+    """POST /api/converse_audio_stream - audio in, streamed pcm_s16le out.
+
+    Same inputs as /api/converse_audio. STT runs before the response starts so real
+    errors still surface as status codes; everything after it is streamed, so the first
+    audio reaches the caller while the rest of the reply is still being generated.
+    """
+    form = await request.form()
+    api_key = str(form.get("api_key") or "")
+    if not apikeys.is_valid(api_key):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key.")
+    audio_field = form.get("audio")
+    if audio_field is None or not hasattr(audio_field, "read"):
+        raise HTTPException(status_code=400, detail="audio file is required.")
+    raw_bytes = await audio_field.read()
+    if not raw_bytes:
+        raise HTTPException(status_code=400, detail="audio file is empty.")
+
+    voice = str(form.get("voice") or tts.DEFAULT_VOICE)
+    emotion = str(form.get("emotion") or DEFAULT_EMOTION)
+    history = _coerce_history(json.loads(str(form.get("history") or "[]")))
+
+    def _transcribe():
+        audio_np, sr = decode_browser_audio(raw_bytes)
+        return stt.transcribe(audio_np, sr)
+
+    try:
+        user_text = await run_in_threadpool(_transcribe)
+    except AudioDecodeError as exc:
+        raise HTTPException(status_code=422, detail=f"Couldn't process that recording: {exc}")
+
+    if not user_text:
+        # Silence/noise rejected by the input gate is a normal turn, not an error.
+        return Response(
+            content=b"", media_type="audio/l16",
+            headers={"X-User-Text": "", "X-Audio-Sample-Rate": str(STREAM_SAMPLE_RATE)},
+        )
+
+    return StreamingResponse(
+        _stream_converse_audio(user_text, voice, emotion, history),
+        media_type="audio/l16",
+        headers={
+            "X-User-Text": quote(user_text),
+            "X-Audio-Sample-Rate": str(STREAM_SAMPLE_RATE),
+            "X-Audio-Sample-Width": "2",
+            "X-Audio-Channels": "1",
+            "X-Audio-Encoding": "pcm_s16le",
+        },
+    )
+
+
 CUSTOM_CSS = """
 :root {
     --nx-bg: #08080c;
@@ -796,6 +898,7 @@ if __name__ == "__main__":
     fastapi_app.add_api_route("/api/config", api_config_route, methods=["GET"])
     fastapi_app.add_api_route("/api/converse", api_converse_route, methods=["POST"])
     fastapi_app.add_api_route("/api/converse_audio", api_converse_audio_route, methods=["POST"])
+    fastapi_app.add_api_route("/api/converse_audio_stream", api_converse_audio_stream_route, methods=["POST"])
     fastapi_app.add_api_route("/api/preview", api_preview_route, methods=["POST"])
     fastapi_app.add_api_route("/api/keys/generate", api_generate_key_route, methods=["POST"])
     fastapi_app.add_api_route("/api/keys/revoke", api_revoke_key_route, methods=["POST"])
