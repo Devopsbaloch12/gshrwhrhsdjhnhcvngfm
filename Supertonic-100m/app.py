@@ -22,7 +22,8 @@ from starlette.routing import Route
 
 FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
-from voice_pipeline import vad, stt, llm, tts, apikeys, avr
+from voice_pipeline import vad, stt, llm, tts, apikeys, avr, avr_stream
+from voice_pipeline.avr_asgi import asr_endpoint
 from voice_pipeline.audio_utils import to_mono_tensor, decode_browser_audio, AudioDecodeError
 from voice_pipeline.emotions import DEFAULT_EMOTION, EMOTION_PRESETS, VOICE_CHOICES
 from voice_pipeline.sentences import chunk_stream
@@ -483,16 +484,11 @@ async def avr_speech_to_text_stream_route(request: Request):
     request_id = _telephony_request_id(request)
     if not _avr_authorized(request):
         raise HTTPException(status_code=401, detail="Invalid or missing API key.")
-    try:
-        pcm = await request.body()
-    except ClientDisconnect:
-        print(f"[AVR][ASR] id={request_id} caller hung up before audio arrived", flush=True)
-        return Response(status_code=204)
-    if not pcm:
-        raise HTTPException(status_code=400, detail="audio body must not be empty.")
-    texts = await run_in_threadpool(avr.transcribe_pcm8k, pcm, request_id)
-    return Response(
-        content="".join(texts).encode("utf-8"),
+    # AVR Core holds this request open for the whole call leg, so the body must be
+    # consumed incrementally. Reading it to completion first only returns on hangup,
+    # which meant the greeting played and nothing the caller said was ever transcribed.
+    return StreamingResponse(
+        avr_stream.stream_transcripts(request.stream(), request_id),
         media_type="text/event-stream",
         headers={"X-Request-ID": request_id, "Cache-Control": "no-cache"},
     )
@@ -527,9 +523,9 @@ async def api_avr_speech_route(request: Request):
     """AVR-native TTS: raw 8 kHz mono pcm_s16le in 20 ms frames."""
     started = time.perf_counter()
     request_id = _telephony_request_id(request)
-    auth = request.headers.get("authorization", "")
-    key = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
-    if not apikeys.is_valid(key):
+    # AVR Core calls this from the local network and has no way to carry a key, so
+    # reuse the same trust rule as the other AVR routes: private peer, or Bearer key.
+    if not _avr_authorized(request):
         raise HTTPException(status_code=401, detail="Invalid or missing API key.")
     body = await request.json()
     text = (body.get("text") or body.get("input") or "").strip()
@@ -992,7 +988,8 @@ def _warmup():
     except Exception as exc:  # don't block startup if warmup itself fails
         print(f"Warmup skipped a step: {exc}", flush=True)
     print(f"Warmup done in {time.time() - t0:.2f}s", flush=True)
-    audiosocket_server.start_in_background()
+    # AVR Core now owns AudioSocket on :5001; the in-process bridge would collide.
+    # audiosocket_server.start_in_background()
 
 
 if __name__ == "__main__":
@@ -1011,7 +1008,10 @@ if __name__ == "__main__":
     fastapi_app.add_api_route("/audio/transcriptions", api_transcriptions_route, methods=["POST"])
     fastapi_app.add_api_route("/audio/speech", api_speech_route, methods=["POST"])
     fastapi_app.add_api_route("/text-to-speech-stream", api_avr_speech_route, methods=["POST"])
-    fastapi_app.add_api_route("/speech-to-text-stream", avr_speech_to_text_stream_route, methods=["POST"])
+    # Raw ASGI: AVR Core needs to keep sending audio while we send transcripts back
+    # on the same request, which Starlette's Request/StreamingResponse cannot do.
+    fastapi_app.router.routes.insert(0, Route("/speech-to-text-stream",
+                                              asr_endpoint, methods=["POST"]))
     fastapi_app.add_api_route("/prompt-stream", avr_prompt_stream_route, methods=["POST"])
 
     if FRONTEND_DIST.is_dir():

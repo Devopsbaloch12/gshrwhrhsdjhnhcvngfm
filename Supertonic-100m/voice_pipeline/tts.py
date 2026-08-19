@@ -16,7 +16,7 @@ from .mp_batch_pool import MPBatchPool
 
 SAMPLE_RATE = 44100
 DEFAULT_VOICE = "F1"  # built-in voices: M1-M5 (male), F1-F5 (female)
-DEFAULT_SPEED = 1.05
+DEFAULT_SPEED = 1.0
 # Multi-item ONNX batches still lose to individual inference, now confirmed on the
 # 16-vCPU box too: enabling _MAX_BATCH=4 measured 11.6s wall for 20 concurrent vs 6.8s
 # unbatched, as the workers contend for cores. (Isolated micro-benchmarks suggest the
@@ -37,7 +37,7 @@ _NUM_WORKERS = 8
 # fidelity and misses a 2s p95 by 36ms at 10 concurrent; four clears it outright, which
 # is why it is the default here. Raise it back to 6 if the voice matters more than the
 # last 350ms.
-_TOTAL_STEPS = 4
+_TOTAL_STEPS = 8
 
 
 def _worker_init():

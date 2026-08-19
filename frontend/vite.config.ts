@@ -13,7 +13,7 @@ export default defineConfig({
   // Supertonic-100m/app.py's serve_frontend route), not from the domain root, so
   // built asset URLs must be prefixed accordingly or the JS/CSS 404 and the page
   // renders blank. The Vite dev server itself still runs at "/".
-  base: "/app/",
+  base: process.env.VITE_BASE_PATH ?? "/app/",
   plugins: [react(), tailwindcss()],
   server: {
     port: 5173,

@@ -33,6 +33,14 @@ export const useSettingsStore = create<SettingsState>()(
       addApiKey: (record) => set((s) => ({ apiKeys: [record, ...s.apiKeys] })),
       revokeApiKey: (id) => set((s) => ({ apiKeys: s.apiKeys.filter((k) => k.id !== id) })),
     }),
-    { name: "nodexlabs-settings" }
+    {
+      name: "nodexlabs-settings",
+      version: 2,
+      migrate: (persisted: unknown) => ({
+        ...(persisted as object),
+        // Always re-adopt the build-time base; a stale one points at a dead path.
+        apiBaseUrl: DEFAULT_API_BASE,
+      }),
+    }
   )
 );
