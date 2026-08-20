@@ -1,6 +1,7 @@
 """Always-listening voice agent: continuous mic stream -> Silero VAD end-pointing ->
 Moonshine (STT) -> Groq (LLM) -> Supertonic (TTS), fully hands-free after one click."""
 
+import asyncio
 import base64
 import audioop
 import io
@@ -519,6 +520,27 @@ async def avr_prompt_stream_route(request: Request):
     )
 
 
+def _to_telephony_pcm(clip, sr: int) -> bytes:
+    """Resample synthesized audio to 8 kHz pcm_s16le with proper anti-aliasing.
+
+    audioop.ratecv interpolates without a lowpass, so going 44.1 kHz -> 8 kHz folds
+    everything above 4 kHz back into the band as aliasing - audible as a breathy,
+    shaky warble. It is worst on voices with more high-frequency energy, which is why
+    the female voices sounded like someone blowing into the mic. torchaudio's resample
+    applies a windowed-sinc lowpass first, which removes the artifact.
+    """
+    import torch
+    import torchaudio
+
+    tensor = torch.from_numpy(np.ascontiguousarray(clip, dtype=np.float32)).unsqueeze(0)
+    if int(sr) != 8000:
+        tensor = torchaudio.functional.resample(
+            tensor, int(sr), 8000, lowpass_filter_width=64
+        )
+    samples = tensor.squeeze(0).clamp(-1.0, 1.0).numpy()
+    return (samples * 32767.0).astype("<i2").tobytes()
+
+
 async def api_avr_speech_route(request: Request):
     """AVR-native TTS: raw 8 kHz mono pcm_s16le in 20 ms frames."""
     started = time.perf_counter()
@@ -568,17 +590,25 @@ async def api_avr_speech_route(request: Request):
             if first_at is None:
                 first_at = time.perf_counter()
             audio_sec += len(clip) / sr if sr else 0.0
-            pcm = (np.clip(clip, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
-            pcm8, rate_state = audioop.ratecv(pcm, 2, 1, int(sr), 8000, rate_state)
+            pcm8 = _to_telephony_pcm(clip, sr)
             for offset in range(0, len(pcm8), 320):
                 sent += 1
+                # Pace to roughly real time, keeping at most _LEAD_SEC of audio ahead.
+                # Delivering the whole reply faster than it plays (3.85s of audio in
+                # 1.4s) puts it entirely in AVR Core's playback buffer, so barge-in
+                # cannot work: Core stops the HTTP stream on interruption but the
+                # caller still hears the rest of the buffered sentence. A small lead
+                # absorbs jitter while keeping interruption responsive.
+                ahead = (sent * 0.02) - (time.perf_counter() - (first_at or started))
+                if ahead > _LEAD_SEC:
+                    await asyncio.sleep(ahead - _LEAD_SEC)
                 yield pcm8[offset:offset + 320]
         ttfa = (first_at - started) if first_at else (time.perf_counter() - started)
-        print(
+        _log.info(
             f"[TELEPHONY] endpoint=avr_tts id={request_id} ttfa={ttfa:.3f}s "
             f"total={time.perf_counter() - started:.3f}s voice={voice} "
             f"text_chars={len(text)} chunks={len(chunks)} audio_sec={audio_sec:.2f} "
-            f"frames={sent} sample_rate=8000", flush=True,
+            f"frames={sent} sample_rate=8000"
         )
 
     return StreamingResponse(
@@ -594,6 +624,9 @@ async def api_avr_speech_route(request: Request):
     )
 
 STREAM_SAMPLE_RATE = 24000
+# How much synthesized audio may sit in the far end's buffer. Larger is safer
+# against jitter, smaller makes barge-in cut in sooner.
+_LEAD_SEC = 999.0
 
 
 def _stream_converse_audio(user_text, voice, emotion, history):

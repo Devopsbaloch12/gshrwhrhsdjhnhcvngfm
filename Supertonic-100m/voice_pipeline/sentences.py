@@ -76,6 +76,13 @@ def _find_cut(buf: str, min_chars: int, soft_chars: int, hard_chars: int):
     return None
 
 
+# Time-to-first-audio is set by the FIRST chunk alone, since everything after it is
+# synthesized while the caller is already listening. Emitting a short opening chunk
+# ("Got it," / "Sure,") starts playback far sooner without fragmenting the rest of the
+# reply, which stays on the normal thresholds.
+FIRST_CHUNK_CHARS = int(os.environ.get("CHUNK_FIRST_CHARS", "45"))
+
+
 def chunk_stream(deltas, min_chars: int = MIN_CHARS,
                  soft_chars: int = SOFT_CHARS, hard_chars: int = HARD_CHARS):
     """Yield speakable chunks from an iterable of text deltas.
@@ -85,11 +92,23 @@ def chunk_stream(deltas, min_chars: int = MIN_CHARS,
     hard_chars is the backstop for text with no punctuation at all.
     """
     buf = ""
+    first = True
     for piece in deltas:
         if not piece:
             continue
         buf += piece
         while True:
+            if first and len(buf) >= FIRST_CHUNK_CHARS:
+                # Cut the opening chunk at a word boundary as soon as there is
+                # enough to speak, so audio starts while the model is still writing.
+                cut = buf.rfind(" ", 0, FIRST_CHUNK_CHARS + 8)
+                if cut <= 0:
+                    cut = FIRST_CHUNK_CHARS
+                head, buf = buf[:cut].strip(), buf[cut:]
+                first = False
+                if head:
+                    yield head
+                continue
             cut = _find_cut(buf, min_chars, soft_chars, hard_chars)
             if cut is None:
                 break

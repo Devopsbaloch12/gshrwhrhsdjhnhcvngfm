@@ -219,24 +219,28 @@ def prompt_stream(messages: list[dict], uuid: str) -> Iterator[bytes]:
     first_at: float | None = None
     chars = 0
     try:
-        # Emit whole sentences rather than raw token deltas. AVR Core forwards each
-        # unit it receives to TTS, and a per-token unit would mean one synthesis call
-        # per word - the chunker is what lets Core pipeline speech against generation.
-        for piece in chunk_stream(llm.reply_stream(messages)):
-            if not piece:
-                continue
-            if first_at is None:
-                first_at = time.perf_counter()
-            chars += len(piece)
-            yield json.dumps({"type": "text", "content": piece}).encode("utf-8")
-    except Exception as exc:  # noqa: BLE001 - upstream API failure must stay audible
-        print(
-            f"[AVR][LLM] uuid={uuid} upstream failed: {type(exc).__name__}: {exc}",
-            flush=True,
-        )
+        # AVR treats every JSON object as a separate TTS job; emit exactly one.
+        text = "".join(llm.reply_stream(messages)).strip()
+        if not text:
+            text = _FALLBACK_REPLY
+        cuts = [text.find(mark) for mark in ".?!" if text.find(mark) >= 0]
+        if cuts:
+            text = text[:min(cuts) + 1]
+        words = text.split()
+        if len(words) > 16:
+            text = " ".join(words[:16]).rstrip(",;:-") + "."
+        first_at = time.perf_counter()
+        chars = len(text)
+        yield json.dumps({"type": "text", "content": text}).encode("utf-8")
+    except Exception as exc:
+        print(f"[AVR][LLM] uuid={uuid} upstream failed: {type(exc).__name__}: {exc}", flush=True)
+        text = _FALLBACK_REPLY
+        chars = len(text)
+        yield json.dumps({"type": "text", "content": text}).encode("utf-8")
+    finally:
+        # Never leave AVR silent when the model emits no content.
         if chars == 0:
             yield json.dumps({"type": "text", "content": _FALLBACK_REPLY}).encode("utf-8")
-    finally:
         elapsed = time.perf_counter() - started
         ttft = (first_at - started) if first_at else elapsed
         print(
