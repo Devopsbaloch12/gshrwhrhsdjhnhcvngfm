@@ -41,6 +41,15 @@ MIN_SPEECH_SEC = 0.35
 MAX_UTTERANCE_SEC = 15.0
 MAX_STREAM_SEC = 3600.0
 
+# Re-engagement. A caller who goes quiet may have put the phone down, been distracted,
+# or simply be thinking. Emitting a cue lets the agent check in rather than both sides
+# waiting in silence until the line drops. The cue is written as a bracketed marker so
+# the prompt can recognise it and respond appropriately; it is never spoken back.
+NUDGE_AFTER_SEC = float(os.environ.get("NUDGE_AFTER_SEC", "8"))
+NUDGE_REPEAT_SEC = float(os.environ.get("NUDGE_REPEAT_SEC", "12"))
+MAX_NUDGES = int(os.environ.get("MAX_NUDGES", "2"))
+NUDGE_CUE = "(the caller has gone quiet)"
+
 _FRAME_MS = 20
 _FRAME_BYTES = 320  # 20 ms of 8 kHz mono pcm_s16le
 _PREROLL_BYTES = 320 * 60
@@ -130,6 +139,9 @@ async def speech_to_text_stream_asgi(scope, receive, send) -> None:
     utterances = 0
     since_emit_ms = 0
     peak_rms = 0
+    last_activity = time.perf_counter()
+    nudges = 0
+    spoke_once = False
 
     try:
         while True:
@@ -161,6 +173,7 @@ async def speech_to_text_stream_asgi(scope, receive, send) -> None:
                     if level >= SILENCE_RMS:
                         speech_ms += _FRAME_MS
                         silence_ms = 0
+                        last_activity = time.perf_counter()
                     elif speech_ms:
                         silence_ms += _FRAME_MS
                     if (speech_ms >= MIN_SPEECH_SEC * 1000
@@ -180,6 +193,9 @@ async def speech_to_text_stream_asgi(scope, receive, send) -> None:
                     text = await loop.run_in_executor(None, _transcribe, utterance)
                     if text:
                         utterances += 1
+                        spoke_once = True
+                        nudges = 0
+                        last_activity = time.perf_counter()
                         _log.info(kv(stage="asr", call=call_id, heard=text[:60]))
                         await send({
                             "type": "http.response.body",
@@ -191,6 +207,23 @@ async def speech_to_text_stream_asgi(scope, receive, send) -> None:
                 elif not speech_ms and len(buf) > _PREROLL_BYTES:
                     # Nothing said yet - do not let dead air grow the buffer.
                     del buf[:-_PREROLL_BYTES]
+
+            # Nothing but silence for a while: prompt the agent to check in. Only
+            # after the caller has spoken at least once, so this never fires before
+            # the conversation has started.
+            if spoke_once and nudges < MAX_NUDGES:
+                idle = time.perf_counter() - last_activity
+                threshold = NUDGE_AFTER_SEC if nudges == 0 else NUDGE_AFTER_SEC + NUDGE_REPEAT_SEC * nudges
+                if idle >= threshold and speech_ms == 0:
+                    nudges += 1
+                    last_activity = time.perf_counter()
+                    _log.info(kv(stage="asr", call=call_id, nudge=nudges,
+                                 idle=round(idle, 1)))
+                    await send({
+                        "type": "http.response.body",
+                        "body": NUDGE_CUE.encode("utf-8"),
+                        "more_body": True,
+                    })
 
             if not message.get("more_body", False):
                 break

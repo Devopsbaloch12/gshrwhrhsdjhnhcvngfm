@@ -15,8 +15,8 @@ from .emotions import VOICE_CHOICES
 from .mp_batch_pool import MPBatchPool
 
 SAMPLE_RATE = 44100
-DEFAULT_VOICE = "F3"  # built-in voices: M1-M5 (male), F1-F5 (female)
-DEFAULT_SPEED = 0.88
+DEFAULT_VOICE = "M2"  # built-in voices: M1-M5 (male), F1-F5 (female)
+DEFAULT_SPEED = 1.02
 # Multi-item ONNX batches still lose to individual inference, now confirmed on the
 # 16-vCPU box too: enabling _MAX_BATCH=4 measured 11.6s wall for 20 concurrent vs 6.8s
 # unbatched, as the workers contend for cores. (Isolated micro-benchmarks suggest the

@@ -579,7 +579,13 @@ async def api_avr_speech_route(request: Request):
 
         # An opener that is already in cache costs nothing to play, so the caller
         # hears the reply begin while the rest of it is still being synthesized.
+        # Assigning to `chunks` here (even on a branch that does not always run)
+        # makes Python treat it as local to this function everywhere it is used,
+        # shadowing the outer `chunks` from closure - every call whose text did not
+        # start with a cached opener then hit UnboundLocalError on the loop below.
+        # `remaining_chunks` avoids reusing the outer name.
         opener, remainder = tts_cache.split_opener(text)
+        remaining_chunks = chunks
         if opener:
             cached = tts_cache.get(opener, voice, tts.DEFAULT_SPEED)
             if cached:
@@ -589,9 +595,9 @@ async def api_avr_speech_route(request: Request):
                     sent += 1
                     yield cached[off:off + 320]
                 # Re-chunk what is left so the opener is not spoken twice.
-                chunks = list(chunk_stream([remainder])) or ([remainder] if remainder else [])
+                remaining_chunks = list(chunk_stream([remainder])) or ([remainder] if remainder else [])
 
-        for piece in chunks:
+        for piece in remaining_chunks:
             hit = tts_cache.get(piece, voice, tts.DEFAULT_SPEED)
             if hit is not None:
                 if first_at is None:

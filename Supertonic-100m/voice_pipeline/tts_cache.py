@@ -41,36 +41,42 @@ OPENERS = [
 # Lines a final expense agent repeats on nearly every call. These are the bulk of a
 # qualification conversation, so caching them removes synthesis from most turns.
 STOCK = [
-    # opening / identity
-    "Hi, am I speaking with the homeowner?",
-    "This is a recorded line.",
-    "I'm an automated assistant, and I can connect you with a licensed agent.",
-    "Did I catch you at a bad time?",
-    "This will only take about two minutes.",
-    # qualification
-    "May I ask your age?",
-    "And what state are you in?",
-    "Are you currently taking any medications?",
-    "Do you have any existing life insurance?",
-    "Have you been hospitalized in the last two years?",
-    "Are you looking to cover funeral costs?",
-    "Who would you want listed as the beneficiary?",
-    "What coverage amount did you have in mind?",
-    # acknowledgement / holding
-    "I understand.",
-    "That makes sense.",
-    "Thank you, I've noted that.",
-    "One moment while I pull that up.",
-    "Let me get that noted for you.",
-    # handoff / close
-    "I'll connect you with a licensed agent who can go over your options.",
-    "A licensed agent will confirm the details and pricing with you.",
+    # greeting / framing
+    "Hi there, this is Mark on a recorded line.",
+    "I'm reaching out about the final expense benefit for your state.",
+    "This only takes about two minutes, and there's no obligation.",
+    "Great, let me ask you a couple of quick questions.",
+    # objection: not interested
+    "I hear you, and most folks say that before they know what it covers.",
+    "Totally fair. Can I give you thirty seconds, and you decide?",
+    # objection: already have coverage
+    "That's smart. Most people find their work policy ends when the job does.",
+    "Good, so you already see the value. This just fills the gap.",
+    # objection: cost
+    "I understand, and that's exactly why we check what you qualify for first.",
+    "A licensed agent handles the numbers, and there's no cost to find out.",
+    # objection: spouse / think about it
+    "Of course, and that's a decision you'd make together.",
+    "Absolutely, most people want to talk it over first.",
+    # objection: where did you get my number
+    "You requested information about final expense coverage online.",
+    "You're on our list because you asked about burial coverage.",
+    # objection: scam / suspicious
+    "I understand the concern, and you can verify us before anything is signed.",
+    "Nothing is signed today, and no payment is taken on this call.",
+    # objection: busy / bad time
+    "No problem at all. When's a better time to reach you?",
+    "I'll be quick, or I can call you right back this afternoon.",
+    # objection: too old / won't qualify
+    "That's the good news, there are no medical exams for this one.",
+    "Most people your age qualify, that's what we're checking.",
+    # acknowledgements
+    "I hear you.", "That makes sense.", "Absolutely.", "I understand.",
+    "Great question.", "Fair enough.",
+    # close / handoff
+    "Let me get a licensed agent on to walk you through it.",
     "Is now a good time to speak with them?",
-    "Thanks for your time, have a good day.",
-    # objections
-    "I completely understand, no pressure at all.",
-    "Would you prefer I call back at a better time?",
-    "You're under no obligation.",
+    "Thanks for your time, take care.",
 ]
 
 _cache: "OrderedDict[tuple[str, str, float], bytes]" = OrderedDict()
