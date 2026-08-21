@@ -23,7 +23,7 @@ from starlette.routing import Route
 
 FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
-from voice_pipeline import vad, stt, llm, tts, apikeys, avr, avr_stream
+from voice_pipeline import vad, stt, llm, tts, apikeys, avr, avr_stream, tts_cache
 from voice_pipeline.avr_asgi import asr_endpoint
 from voice_pipeline.audio_utils import to_mono_tensor, decode_browser_audio, AudioDecodeError
 from voice_pipeline.emotions import DEFAULT_EMOTION, EMOTION_PRESETS, VOICE_CHOICES
@@ -576,7 +576,31 @@ async def api_avr_speech_route(request: Request):
         first_at = None
         audio_sec = 0.0
         sent = 0
+
+        # An opener that is already in cache costs nothing to play, so the caller
+        # hears the reply begin while the rest of it is still being synthesized.
+        opener, remainder = tts_cache.split_opener(text)
+        if opener:
+            cached = tts_cache.get(opener, voice, tts.DEFAULT_SPEED)
+            if cached:
+                first_at = time.perf_counter()
+                audio_sec += len(cached) / 2 / 8000
+                for off in range(0, len(cached), 320):
+                    sent += 1
+                    yield cached[off:off + 320]
+                # Re-chunk what is left so the opener is not spoken twice.
+                chunks = list(chunk_stream([remainder])) or ([remainder] if remainder else [])
+
         for piece in chunks:
+            hit = tts_cache.get(piece, voice, tts.DEFAULT_SPEED)
+            if hit is not None:
+                if first_at is None:
+                    first_at = time.perf_counter()
+                audio_sec += len(hit) / 2 / 8000
+                for off in range(0, len(hit), 320):
+                    sent += 1
+                    yield hit[off:off + 320]
+                continue
             try:
                 clip, sr = await run_in_threadpool(
                     tts.synthesize, piece, voice, tts.DEFAULT_SPEED
@@ -591,6 +615,7 @@ async def api_avr_speech_route(request: Request):
                 first_at = time.perf_counter()
             audio_sec += len(clip) / sr if sr else 0.0
             pcm8 = _to_telephony_pcm(clip, sr)
+            tts_cache.put(piece, voice, tts.DEFAULT_SPEED, pcm8)
             for offset in range(0, len(pcm8), 320):
                 sent += 1
                 # Pace to roughly real time, keeping at most _LEAD_SEC of audio ahead.
@@ -1021,6 +1046,10 @@ def _warmup():
     except Exception as exc:  # don't block startup if warmup itself fails
         print(f"Warmup skipped a step: {exc}", flush=True)
     print(f"Warmup done in {time.time() - t0:.2f}s", flush=True)
+    tts_cache.warm(
+        lambda t: _to_telephony_pcm(*tts.synthesize(t, tts.DEFAULT_VOICE, tts.DEFAULT_SPEED)),
+        tts.DEFAULT_VOICE, tts.DEFAULT_SPEED,
+    )
     # AVR Core now owns AudioSocket on :5001; the in-process bridge would collide.
     # audiosocket_server.start_in_background()
 
