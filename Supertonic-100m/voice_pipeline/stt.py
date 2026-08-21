@@ -15,14 +15,19 @@ from .mp_batch_pool import MPBatchPool
 from .obs import get_logger, kv, turn_id
 
 SAMPLE_RATE = 16000
-_MAX_BATCH = 8
+# Batching Moonshine returns empty transcripts for variable-length clips - the exact
+# failure .env.example warns about. It does not show up in load tests that reuse one
+# fixed clip, only on real calls where every utterance is a different length: one turn
+# transcribes and every later one comes back empty, so the agent goes silent mid-call.
+# One clip per forward pass costs throughput and buys correctness.
+_MAX_BATCH = 1
 _BATCH_WINDOW_SEC = 0.01
 # Moonshine runs locally, so unlike the remote Groq path its thread count is a real
 # latency dial: raising _CPU_THREADS 1 -> 4 cut STT from 0.61s to 0.34s per turn.
 # Deployed as 8 workers x 2 threads (see .env), which beat 4x4 by ~0.6s of p95 at 15
 # concurrent - more workers absorb bursts better than wider ones go fast.
 _NUM_WORKERS = int(os.environ.get("STT_WORKERS", "4"))
-_CPU_THREADS = int(os.environ.get("STT_THREADS", "4"))
+_CPU_THREADS = int(os.environ.get("STT_THREADS", "6"))
 # Beam search runs num_beams hypotheses per clip - 5 beams is ~5x the decode compute
 # of greedy on CPU, which dominates STT cost once several callers overlap.
 _BEAMS = int(os.environ.get("STT_BEAMS", "5"))
@@ -34,7 +39,7 @@ _GROQ_WORKERS = 24
 _log = get_logger("stt")
 
 _PROVIDER = os.environ.get("STT_PROVIDER", "moonshine").lower()
-_MIN_LEVEL = 0.005
+_MIN_LEVEL = 0.0015
 _MIN_DURATION_SEC = 0.3
 
 _HALLUCINATION_ARTIFACTS = {
@@ -132,12 +137,19 @@ def _moonshine_worker_batch(state, items):
     wavs = [item[0] for item in items]
     inputs = state["processor"](wavs, sampling_rate=SAMPLE_RATE, return_tensors="pt", padding=True)
     with torch.no_grad():
+        # Greedy, with no anti-repetition penalties. num_beams=5 with
+        # no_repeat_ngram_size=3 and repetition_penalty=1.2 were suppressing ordinary
+        # conversational speech: phrases that repeat naturally ("yeah yeah",
+        # "okay okay", "I mean, I mean") get penalised hard enough that the model can
+        # pick end-of-sequence immediately and return an empty string. That showed up
+        # as roughly half of all utterances transcribing blank on real calls, at
+        # healthy audio levels and with no duration pattern - the caller simply gets
+        # ignored and has to repeat themselves. Greedy is also markedly faster.
         generated_ids = state["model"].generate(
             **inputs,
             max_new_tokens=180,
-            num_beams=_BEAMS,
-            no_repeat_ngram_size=3,
-            repetition_penalty=1.2,
+            num_beams=1,
+            do_sample=False,
         )
     texts = state["processor"].batch_decode(generated_ids, skip_special_tokens=True)
     return [t.strip() for t in texts]
